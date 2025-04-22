@@ -6,3 +6,12 @@ models/
 samples/
 echo/lidm
 echo/privacy
+
+# other
+*.pyc
+*.pyo
+*.pyd
+*__pycache__*
+*.egg-info
+*.egg
+*.log
