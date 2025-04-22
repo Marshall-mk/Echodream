@@ -343,7 +343,9 @@ if __name__ == "__main__":
         conditioning_value = None  # For text, we'll handle differently
 
     if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-        dummy_added_time_ids = torch.zeros((B, config.unet.addition_time_embed_dim), device=device, dtype=dtype)
+        dummy_added_time_ids = torch.zeros(
+            (B, config.unet.addition_time_embed_dim), device=device, dtype=dtype
+        )
         forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
     sample_index = 0
@@ -383,18 +385,25 @@ if __name__ == "__main__":
                         latent_cond_images
                     ).latent_dist.sample()
                     latent_cond_images = latent_cond_images * vae.config.scaling_factor
-                
+
                 # Initialize the frames buffer with the conditioning frames
                 all_frames = []
-                
+
                 # Initialize conditioning frames - expand to match the expected dimensions
-                conditioning_frames = latent_cond_images[:,:,None,:,:].repeat(1, 1, prior_frames, 1, 1) # B x C x T x H x W
+                conditioning_frames = latent_cond_images[:, :, None, :, :].repeat(
+                    1, 1, prior_frames, 1, 1
+                )  # B x C x T x H x W
                 # Apply classifier-free guidance if specified
                 use_guidance = args.guidance_scale > 1.0
                 # Generate frames autoregressively with the specified stride
                 for frame_idx in range(0, total_frames, stride):
                     # Prepare latent noise for current_stride frames
-                    latents = torch.randn((B, C, prior_frames, H, W), device=device, dtype=dtype, generator=generator)
+                    latents = torch.randn(
+                        (B, C, prior_frames, H, W),
+                        device=device,
+                        dtype=dtype,
+                        generator=generator,
+                    )
                     # Denoise the latent
                     with torch.autocast("cuda"):
                         for t in timesteps:
@@ -407,7 +416,7 @@ if __name__ == "__main__":
                             latent_model_input = torch.cat(
                                 (latent_model_input, latent_cond_images), dim=1
                             )  # B x 2C x T x H x W
-                            
+
                             # Duplicate input for classifier-free guidance if needed
                             if use_guidance and args.sampling_mode == "diffusion":
                                 pass
@@ -417,30 +426,38 @@ if __name__ == "__main__":
                                     latent_model_input, mult=3
                                 )
 
-                            
-                                noise_pred = unet(latent_model_input, **forward_kwargs).sample
+                                noise_pred = unet(
+                                    latent_model_input, **forward_kwargs
+                                ).sample
                                 noise_pred = format_output(noise_pred, pad=padding)
                             # Update latents based on sampling mode
                             if args.sampling_mode == "diffusion":
-                                latents = scheduler.step(noise_pred, t, latents).prev_sample
+                                latents = scheduler.step(
+                                    noise_pred, t, latents
+                                ).prev_sample
                             else:  # flow_matching
                                 # Euler step: x_t+1 = x_t - v(x_t, t) * dt
                                 dt = 1.0 / (len(timesteps) - 1)
                                 latents = latents - noise_pred * dt
 
-                    
                     # Store the generated frames
-                    all_frames.append(latents[:,:,:stride,:,:]) # B x C x T x H x W
+                    all_frames.append(latents[:, :, :stride, :, :])  # B x C x T x H x W
                     # Update conditioning frames with the generated frames
-                    conditioning_frames = torch.cat((conditioning_frames[:,:,stride:,:,:], latents[:,:,:stride,:,:]), dim=2)
-                
+                    conditioning_frames = torch.cat(
+                        (
+                            conditioning_frames[:, :, stride:, :, :],
+                            latents[:, :, :stride, :, :],
+                        ),
+                        dim=2,
+                    )
+
                 # Concatenate all generated frames
                 video_latents = torch.cat(all_frames, dim=2)  # B x C x T x H x W
-                
+
                 # Make sure we have exactly total_frames
                 if video_latents.shape[2] > total_frames:
-                    video_latents = video_latents[:,:,:total_frames,:,:]
-                        
+                    video_latents = video_latents[:, :, :total_frames, :, :]
+
                 # VAE decode
                 latents = rearrange(latents, "b c t h w -> (b t) c h w").cpu()
                 latents = latents / vae.config.scaling_factor
@@ -463,9 +480,7 @@ if __name__ == "__main__":
 
                 # Get conditioning values for metadata
                 if args.conditioning_type == "class_id":
-                    cond_values = (
-                        conditioning.squeeze().to(torch.int).tolist()
-                    )
+                    cond_values = conditioning.squeeze().to(torch.int).tolist()
                 elif args.conditioning_type == "lvef":
                     cond_values = conditioning.squeeze().tolist()
                 elif args.conditioning_type == "view":

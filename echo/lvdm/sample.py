@@ -379,7 +379,7 @@ if __name__ == "__main__":
                     if TR > 1
                     else conditioning
                 )
-                
+
                 # print(
                 #     f"Conditioning shape: {conditioning.shape}, dtype: {conditioning.dtype}, range: [{conditioning.min()}, {conditioning.max()}]"
                 # )
@@ -541,9 +541,7 @@ if __name__ == "__main__":
 
                 # Get conditioning values for metadata
                 if args.conditioning_type == "class_id":
-                    cond_values = (
-                        conditioning.squeeze()[::TR].to(torch.int).tolist()
-                    )
+                    cond_values = conditioning.squeeze()[::TR].to(torch.int).tolist()
                 elif args.conditioning_type == "lvef":
                     cond_values = conditioning.squeeze()[::TR].tolist()
                 elif args.conditioning_type == "view":

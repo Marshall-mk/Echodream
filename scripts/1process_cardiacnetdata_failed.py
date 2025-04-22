@@ -142,11 +142,7 @@ def main():
     os.makedirs(videos_dir, exist_ok=True)
 
     # Map classes to integers - using simplified 3-class approach
-    class_mapping = {
-        "Normal": 0,
-        "ASD": 1,
-        "PAH": 2
-    }
+    class_mapping = {"Normal": 0, "ASD": 1, "PAH": 2}
 
     # Data for CSV file
     csv_data = []
@@ -196,12 +192,12 @@ def main():
                                 # original_name = file.replace("_image.nii", "")
                                 # patient_number = original_name.split("-")[1]
                                 if class_dir.startswith("Non-"):
-                                    suffix = '_' + class_dir.split("-")[1]
+                                    suffix = "_" + class_dir.split("-")[1]
                                 else:
-                                    suffix = ''
+                                    suffix = ""
                                 # Create patient_id with class prefix
                                 patient_id = f"{actual_class.lower()}{suffix.lower()}_{patient_number}"
-                                
+
                                 # Create output video filename that preserves original name with a class prefix
                                 video_filename = f"{actual_class.lower()}{suffix.lower()}_{original_name}.{args.output_format}"
                                 video_path = os.path.join(videos_dir, video_filename)

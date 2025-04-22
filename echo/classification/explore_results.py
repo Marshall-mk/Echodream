@@ -1,15 +1,17 @@
 import numpy as np
 
 # Load the data
-t = np.load('/home/khmuhammad/Echo-Dream/experiments/classification/real/cls_real/test_results.npz')
+t = np.load(
+    "/home/khmuhammad/Echo-Dream/experiments/classification/real/cls_real/test_results.npz"
+)
 
 # Print available keys
 print("Available keys:", list(t.keys()))
 
 # Access data correctly
-predictions = t['predictions']
-targets = t['targets']
-accuracy = t['accuracy']
+predictions = t["predictions"]
+targets = t["targets"]
+accuracy = t["accuracy"]
 
 # Print information
 print(f"Accuracy: {accuracy}")

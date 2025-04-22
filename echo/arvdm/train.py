@@ -41,7 +41,7 @@ from echo.common import (
     pad_reshape,
     unpad_reshape,
     instantiate_from_config,
-    FlowMatchingScheduler
+    FlowMatchingScheduler,
 )
 from echo.common.datasets import instantiate_dataset
 
@@ -61,6 +61,7 @@ CUDA_VISIBLE_DEVICES='0,1,7'accelerate launch  --num_processes 3  --multi_gpu
 --training_mode diffusion 
 --conditioning_type class_id
 """
+
 
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
@@ -91,10 +92,10 @@ def log_validation(
 
     val_unet = accelerator.unwrap_model(unet)
     val_vae = vae.to(accelerator.device, dtype=torch.float32)
-    
+
     if text_encoder is not None:
         text_encoder = text_encoder.to(accelerator.device, dtype=weight_dtype)
-    
+
     scheduler.set_timesteps(config.validation_timesteps)
     timesteps = scheduler.timesteps
 
@@ -402,18 +403,18 @@ def train(
         if config.unet._class_name == "UNetSpatioTemporalConditionModel"
         else unpadf
     )
-    # setup text encoder and tokenizer  
+    # setup text encoder and tokenizer
     tokenizer = CLIPTokenizer.from_pretrained(config.pretrained_model_name_or_path)
     text_encoder = CLIPTextModel.from_pretrained(config.pretrained_model_name_or_path)
-    
+
     # Freeze VAE, train UNet
     vae.requires_grad_(False)
     unet.train()
-    if not config.train_text_encoder: # freeze text encoder if not training it
+    if not config.train_text_encoder:  # freeze text encoder if not training it
         text_encoder.requires_grad_(False)
     else:
         text_encoder.train()
-        
+
     # Create EMA for the UNet if needed
     if config.use_ema:
         ema_unet = unet_klass(**unet_kwargs)
@@ -501,8 +502,10 @@ def train(
     )
     # Prepare with accelerator
     if config.train_text_encoder:
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = (
+            accelerator.prepare(
+                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+            )
         )
     else:
         unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -525,7 +528,7 @@ def train(
     vae.to(accelerator.device, dtype=weight_dtype)
     if not config.train_text_encoder:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
-        
+
     # Recalculate training steps
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / config.gradient_accumulation_steps
@@ -535,7 +538,7 @@ def train(
     config.num_train_epochs = math.ceil(
         config.max_train_steps / num_update_steps_per_epoch
     )
-    
+
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
@@ -547,7 +550,7 @@ def train(
             init_kwargs={
                 "wandb": {"group": config.wandb_group},
             },
-        )    
+        )
 
     # Calculate total batch size and model parameters
     total_batch_size = (
@@ -639,17 +642,15 @@ def train(
                     conditioning = batch["view"].to(dtype=weight_dtype)
                 elif conditioning_type == "text":
                     # tokenize text inputs
-                    input_ids, attention_mask = tokenize_text(
-                        batch["text"], tokenizer
-                    )
+                    input_ids, attention_mask = tokenize_text(batch["text"], tokenizer)
                     # Move tensors to the correct device
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
-                    
+
                     # encode text inputs through CLIP
                     text_outputs = text_encoder(
-                        input_ids,
-                        attention_mask=attention_mask)
+                        input_ids, attention_mask=attention_mask
+                    )
                     # Extract hidden states and convert to proper dtype
                     conditioning = text_outputs[0].to(dtype=weight_dtype)
                 else:
@@ -913,16 +914,17 @@ if __name__ == "__main__":
     # Set default validation samples if not in config
     if not hasattr(config, "num_validation_samples"):
         config.num_validation_samples = 4
-    
+
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (
-        not hasattr(config, "text_encoder_path") or not hasattr(config, "tokenizer_path")
+        not hasattr(config, "text_encoder_path")
+        or not hasattr(config, "tokenizer_path")
     ):
         config.text_encoder_path = "openai/clip-vit-large-patch14"
         config.pretrained_model_name_or_path = "openai/clip-vit-large-patch14"
         config.tokenizer_path = "openai/clip-vit-large-patch14"
         config.train_text_encoder = True
-        
+
     train(
         config,
         training_mode=args.training_mode,

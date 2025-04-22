@@ -71,15 +71,21 @@ if __name__ == "__main__":
 
             new_frame_count = np.floor(args.fps / fps * nframes).astype(int)
             resample_indices = (
-                np.linspace(0, nframes, new_frame_count, endpoint=False).round().astype(int)
+                np.linspace(0, nframes, new_frame_count, endpoint=False)
+                .round()
+                .astype(int)
             )
 
             assert len(resample_indices) >= args.frames
             resample_indices = resample_indices[: args.frames]
             # print(video_path)
-            reader = decord.VideoReader(video_path, ctx=decord.cpu(), width=112, height=112)
+            reader = decord.VideoReader(
+                video_path, ctx=decord.cpu(), width=112, height=112
+            )
             video = reader.get_batch(resample_indices)  # T x H x W x C, uint8 tensor
-            video = video.float().mean(axis=-1).clamp(0, 255).to(torch.uint8)  # T x H x W
+            video = (
+                video.float().mean(axis=-1).clamp(0, 255).to(torch.uint8)
+            )  # T x H x W
             video = video.unsqueeze(-1).repeat(1, 1, 1, 3)  # T x H x W x 3
 
             folder_name = video_name[:-4]  # remove .avi

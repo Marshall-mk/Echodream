@@ -190,7 +190,7 @@ def main():
 
                                 original_name = subdir.replace("_image.nii", "")
                                 patient_number = int(original_name)
-                                
+
                                 # if class_dir.startswith("Non-"):
                                 #     suffix = '_' + class_dir.split("-")[1]
                                 # else:

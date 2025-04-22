@@ -50,11 +50,11 @@ class VideoDataset(torch.utils.data.Dataset):
             self.skipped_videos.append(self.valid_videos[idx])
             # Remove this video from valid_videos for future iterations
             self.valid_videos.pop(idx)
-            
+
             # If we've run out of videos, raise an exception
             if len(self.valid_videos) == 0:
                 raise RuntimeError("No valid videos found in the dataset")
-                
+
             # Try the next video (which is now at the same index)
             return self.__getitem__(idx)
 
@@ -131,7 +131,7 @@ if __name__ == "__main__":
 
     # for vpath in tqdm(videos):
     for video, vpath, fps in tqdm(dl):
-        try:    
+        try:
             video = video[0]
             vpath = vpath[0]
             fps = fps[0]

@@ -2,6 +2,7 @@ import cv2
 import os
 import argparse
 
+
 def extract_frames_from_videos(video_folder, output_folder):
     # Ensure the output folder exists
     os.makedirs(output_folder, exist_ok=True)
@@ -11,7 +12,7 @@ def extract_frames_from_videos(video_folder, output_folder):
         video_path = os.path.join(video_folder, video_file)
 
         # Skip if it's not a video file
-        if not video_file.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        if not video_file.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
             continue
 
         # Create a folder for the current video's frames
@@ -36,10 +37,19 @@ def extract_frames_from_videos(video_folder, output_folder):
         cap.release()
         print(f"Extracted {frame_count} frames from {video_file} into {frames_folder}")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract frames from videos and save them as JPG images.")
-    parser.add_argument("--video_folder", type=str, help="Path to the folder containing video files.")
-    parser.add_argument("--output_folder", type=str, help="Path to the folder where frames will be saved.")
-    
+    parser = argparse.ArgumentParser(
+        description="Extract frames from videos and save them as JPG images."
+    )
+    parser.add_argument(
+        "--video_folder", type=str, help="Path to the folder containing video files."
+    )
+    parser.add_argument(
+        "--output_folder",
+        type=str,
+        help="Path to the folder where frames will be saved.",
+    )
+
     args = parser.parse_args()
     extract_frames_from_videos(args.video_folder, args.output_folder)

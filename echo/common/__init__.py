@@ -14,6 +14,7 @@ import imageio
 import diffusers
 from transformers import CLIPTextModel, CLIPTokenizer
 
+
 def padf(tensor, mult=3):
     """
     Pads a tensor along the last dimension to make its size a multiple of 2^mult.
@@ -327,6 +328,7 @@ def parse_formats(s):
             )
     return formats
 
+
 class FlowMatchingScheduler:
     def __init__(self, num_train_timesteps=1000):
         self.config = type(
@@ -361,17 +363,28 @@ class FlowMatchingScheduler:
     def __call__(self, sample, timestep):
         # Call method for the scheduler
         return self.scale_model_input(sample, timestep)
-    
-def load_clip_text_encoder(pretrained_model_name_or_path="openai/clip-vit-large-patch14"):
+
+
+def load_clip_text_encoder(
+    pretrained_model_name_or_path="openai/clip-vit-large-patch14",
+):
     """Load CLIP tokenizer and text encoder for text conditioning"""
     tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_name_or_path)
     text_encoder = CLIPTextModel.from_pretrained(pretrained_model_name_or_path)
     return tokenizer, text_encoder
 
-def encode_prompt(tokenizer, text_encoder, prompt, device, num_images_per_prompt=1, do_classifier_free_guidance=False):
+
+def encode_prompt(
+    tokenizer,
+    text_encoder,
+    prompt,
+    device,
+    num_images_per_prompt=1,
+    do_classifier_free_guidance=False,
+):
     """Encodes the prompt into text encoder hidden states"""
     batch_size = len(prompt) if isinstance(prompt, list) else 1
-    
+
     text_inputs = tokenizer(
         prompt,
         padding="max_length",
@@ -380,22 +393,25 @@ def encode_prompt(tokenizer, text_encoder, prompt, device, num_images_per_prompt
         return_tensors="pt",
     )
     text_input_ids = text_inputs.input_ids
-    
-    if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
+
+    if (
+        hasattr(text_encoder.config, "use_attention_mask")
+        and text_encoder.config.use_attention_mask
+    ):
         attention_mask = text_inputs.attention_mask.to(device)
     else:
         attention_mask = None
-        
+
     text_embeddings = text_encoder(
         text_input_ids.to(device),
         attention_mask=attention_mask,
     )
     text_embeddings = text_embeddings[0]
-    
+
     # duplicate text embeddings for each generation per prompt
     if num_images_per_prompt > 1:
         text_embeddings = text_embeddings.repeat(num_images_per_prompt, 1, 1)
-    
+
     # For classifier-free guidance, we need to do two forward passes.
     # Here we prepare the unconditional embeddings (empty text)
     if do_classifier_free_guidance:
@@ -407,23 +423,26 @@ def encode_prompt(tokenizer, text_encoder, prompt, device, num_images_per_prompt
             truncation=True,
             return_tensors="pt",
         )
-        
-        if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
+
+        if (
+            hasattr(text_encoder.config, "use_attention_mask")
+            and text_encoder.config.use_attention_mask
+        ):
             uncond_attention_mask = uncond_input.attention_mask.to(device)
         else:
             uncond_attention_mask = None
-            
+
         uncond_embeddings = text_encoder(
             uncond_input.input_ids.to(device),
             attention_mask=uncond_attention_mask,
         )
         uncond_embeddings = uncond_embeddings[0]
-        
+
         # duplicate unconditional embeddings for each generation per prompt
         if num_images_per_prompt > 1:
             uncond_embeddings = uncond_embeddings.repeat(num_images_per_prompt, 1, 1)
-            
+
         # For classifier-free guidance, concat the unconditional and conditional embeddings
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-        
+
     return text_embeddings

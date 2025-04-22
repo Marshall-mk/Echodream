@@ -10,6 +10,7 @@ from torchvision.transforms.functional import center_crop
 
 from PIL import Image
 import decord
+
 decord.bridge.set_bridge("torch")
 
 
@@ -37,10 +38,13 @@ class EchoDynamic(Dataset):
         assert [o in ["video", "image", "lvef", "text"] for o in self.outputs], (
             "Outputs must be a list of video, image, lvef, text"
         )
-        
+
         # Add text template configuration
-        self.text_template = config.get("text_template", "An echocardiography video with Left Ventricular Ejection Fraction {}%")
-        
+        self.text_template = config.get(
+            "text_template",
+            "An echocardiography video with Left Ventricular Ejection Fraction {}%",
+        )
+
         # self.duration_frames = int(self.target_fps * self.duration_seconds)
         self.duration_frames = config.target_nframes
         self.duration_seconds = (
@@ -194,7 +198,7 @@ class EchoDynamic(Dataset):
         if "lvef" in self.outputs:
             lvef = row["EF"] / 100.0  # normalize to [0, 1]
             output["lvef"] = torch.tensor(lvef, dtype=torch.float32)
-            
+
         if "text" in self.outputs and "EF" in row:
             output["text"] = self.text_template.format(int(row["EF"]))
 
@@ -210,6 +214,7 @@ class EchoDynamic(Dataset):
             return output, row
 
         return output
+
 
 class EchoDynamicLatent(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
@@ -298,7 +303,7 @@ class EchoDynamicLatent(EchoDynamic):
         if "lvef" in self.outputs:
             lvef = row["EF"] / 100.0
             output["lvef"] = torch.tensor(lvef, dtype=torch.float32)
-            
+
         if "text" in self.outputs and "EF" in row:
             output["text"] = self.text_template.format(int(row["EF"]))
 
@@ -312,6 +317,7 @@ class EchoDynamicLatent(EchoDynamic):
             return output, row
 
         return output
+
 
 class EchoDynamicLatentAR(Dataset):
     def __init__(
@@ -521,6 +527,7 @@ class EchoDynamicLatentAR(Dataset):
 
         return output
 
+
 class EchoPediatric(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
         super().__init__(config, split)
@@ -539,7 +546,7 @@ class EchoPediatric(EchoDynamic):
         output, row = super().__getitem__(idx, return_row=True)
         if "view" in self.outputs:
             output["view"] = row["View"]
-            
+
         if "text" in self.outputs:
             # Include view in text if available
             ef_text = self.text_template.format(int(row["EF"]))
@@ -550,12 +557,16 @@ class EchoPediatric(EchoDynamic):
 
         return output
 
+
 class EchoPediatricLatent(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
         self.config = config
-        
+
         # Default text template for pediatric condition
-        self.text_template = config.get("text_template", "An echocardiography video with Left Ventricular Ejection Fraction {}%")
+        self.text_template = config.get(
+            "text_template",
+            "An echocardiography video with Left Ventricular Ejection Fraction {}%",
+        )
 
         super().__init__(config, split, datafolder="Latents", ext=".pt")
 
@@ -568,7 +579,7 @@ class EchoPediatricLatent(EchoDynamic):
             self.metadata.reset_index(inplace=True, drop=True)
             if len(self.metadata) == 0:
                 raise ValueError(f"No videos found for view {self.view}")
-        
+
     def __getitem__(self, idx, return_row=False):
         row = self.metadata.iloc[idx]
         output = {
@@ -628,9 +639,7 @@ class EchoPediatricLatent(EchoDynamic):
                 assert len(latent_video_sample) == self.duration_frames, (
                     f"Video length is {len(latent_video_sample)} but should be {self.duration_frames}"
                 )
-            latent_video_sample = latent_video_sample.permute(
-                1, 0, 2, 3
-            )
+            latent_video_sample = latent_video_sample.permute(1, 0, 2, 3)
             # T x C x H x W -> C x T x H x W
             output["video"] = self.transform(latent_video_sample)
             output["fps"] = target_fps
@@ -654,19 +663,20 @@ class EchoPediatricLatent(EchoDynamic):
             return output, row
         return output
 
+
 class CardiacNet(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
         super().__init__(config, split)
 
         # class_id
         self.class_id = config.get("class_id", "ALL")  # ASD, PAH, ALL
-        
+
         # class id mapping to class names
         self.class_name_mapping = {
-            0 : "Atrial Septal Defect",
-            1 : "Non-Atrial Septal Defect",
-            2 : "Non-Pulmonary Arterial Hypertension",
-            3 : "Pulmonary Arterial Hypertension",
+            0: "Atrial Septal Defect",
+            1: "Non-Atrial Septal Defect",
+            2: "Non-Pulmonary Arterial Hypertension",
+            3: "Pulmonary Arterial Hypertension",
         }
         if self.class_id == "ALL":
             pass
@@ -677,35 +687,42 @@ class CardiacNet(EchoDynamic):
                 raise ValueError(f"No videos found for class_id {self.class_id}")
 
         # Default text template for cardiac condition
-        self.text_template = config.get("text_template", "An echocardiography video with {} condition")
+        self.text_template = config.get(
+            "text_template", "An echocardiography video with {} condition"
+        )
 
     def __getitem__(self, idx):
         output, row = super().__getitem__(idx, return_row=True)
         if "class_id" in self.outputs:
             output["class_id"] = row["class_id"]
-            
+
         if "text" in self.outputs:
-            output["text"] = self.text_template.format(self.class_name_mapping[row["class_id"]])
-            
+            output["text"] = self.text_template.format(
+                self.class_name_mapping[row["class_id"]]
+            )
+
         return output
+
 
 class CardiacNetLatent(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
         self.config = config
-        
+
         # Default text template for cardiac condition
-        self.text_template = config.get("text_template", "An echocardiography video with {} condition")
+        self.text_template = config.get(
+            "text_template", "An echocardiography video with {} condition"
+        )
 
         super().__init__(config, split, datafolder="Latents", ext=".pt")
 
         self.class_id = config.get("class_id", "ALL")  # A4C, PSAX, ALL
-        
+
         # class id mapping to class names
         self.class_name_mapping = {
-            0 : "Atrial Septal Defect",
-            1 : "Non-Atrial Septal Defect",
-            2 : "Non-Pulmonary Arterial Hypertension",
-            3 : "Pulmonary Arterial Hypertension",
+            0: "Atrial Septal Defect",
+            1: "Non-Atrial Septal Defect",
+            2: "Non-Pulmonary Arterial Hypertension",
+            3: "Pulmonary Arterial Hypertension",
         }
         if self.class_id == "ALL":
             pass
@@ -796,14 +813,17 @@ class CardiacNetLatent(EchoDynamic):
 
         if "class_id" in self.outputs:
             output["class_id"] = row["class_id"]
-            
+
         if "text" in self.outputs and "class_id" in row:
-            output["text"] = self.text_template.format(self.class_name_mapping[row["class_id"]])
+            output["text"] = self.text_template.format(
+                self.class_name_mapping[row["class_id"]]
+            )
 
         if return_row:
             return output, row
 
         return output
+
 
 class CardiacNetLatentAR(Dataset):
     def __init__(
@@ -904,10 +924,10 @@ class CardiacNetLatentAR(Dataset):
         self.class_id = class_id  # ASD, PAH, ALL
         # class id mapping to class names
         self.class_name_mapping = {
-            0 : "Atrial Septal Defect",
-            1 : "Non-Atrial Septal Defect",
-            2 : "Non-Pulmonary Arterial Hypertension",
-            3 : "Pulmonary Arterial Hypertension",
+            0: "Atrial Septal Defect",
+            1: "Non-Atrial Septal Defect",
+            2: "Non-Pulmonary Arterial Hypertension",
+            3: "Pulmonary Arterial Hypertension",
         }
         if self.class_id == "ALL":
             pass
@@ -1016,9 +1036,12 @@ class CardiacNetLatentAR(Dataset):
         if "class_id" in self.outputs and "class_id" in row:
             output["class_id"] = row["class_id"]
             # Include class_name in text conditioning
-            output["text"] = f"{output['text']}, Class: {self.class_name_mapping[row['class_id']]}"
+            output["text"] = (
+                f"{output['text']}, Class: {self.class_name_mapping[row['class_id']]}"
+            )
 
         return output
+
 
 class FrameFolder(Dataset):
     """config:
@@ -1109,6 +1132,7 @@ class FrameFolder(Dataset):
 
         return output
 
+
 class RFBalancer(Dataset):  # Real - Fake Balancer
     """
     Balances the dataset by sampling from each dataset with equal probability.
@@ -1167,6 +1191,7 @@ class RFBalancer(Dataset):  # Real - Fake Balancer
 
         return output
 
+
 class ImageSet(Dataset):
     def __init__(self, root, ext=".jpg"):
         self.root = root
@@ -1181,6 +1206,7 @@ class ImageSet(Dataset):
         image = image.transpose(2, 0, 1)  # H x W x C -> C x H x W
         return image
 
+
 class TensorSet(Dataset):
     def __init__(self, root):
         self.root = root
@@ -1193,6 +1219,7 @@ class TensorSet(Dataset):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
         return tensor
 
+
 class TensorSetv2(Dataset):
     def __init__(self, root, num_frames=1):
         self.root = root
@@ -1204,7 +1231,8 @@ class TensorSetv2(Dataset):
 
     def __getitem__(self, idx):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
-        return tensor[:self.num_frames]
+        return tensor[: self.num_frames]
+
 
 class SimaseUSVideoDataset(Dataset):
     def __init__(
@@ -1264,6 +1292,7 @@ class SimaseUSVideoDataset(Dataset):
         print("Preloading videos")
         for i in range(len(self)):
             self.videos.append(self.get_vid(i, from_disk=True))
+
 
 class SiameseUSDataset(Dataset):
     def __init__(
@@ -1342,6 +1371,7 @@ class SiameseUSDataset(Dataset):
         print("Preloading videos")
         for i in range(len(self)):
             self.videos.append(self.get_vid(i, from_disk=True))
+
 
 def instantiate_dataset(configs, split=["TRAIN", "VAL", "TEST"]):
     # config = config.copy()

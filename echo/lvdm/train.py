@@ -27,7 +27,7 @@ from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
     DiffusionPipeline,
-    UNet3DConditionModel,   
+    UNet3DConditionModel,
     UNetSpatioTemporalConditionModel,
 )
 from diffusers.optimization import get_scheduler
@@ -45,7 +45,7 @@ from echo.common import (
     pad_reshape,
     unpad_reshape,
     instantiate_from_config,
-    FlowMatchingScheduler
+    FlowMatchingScheduler,
 )
 from echo.common.datasets import instantiate_dataset
 
@@ -64,6 +64,7 @@ CUDA_VISIBLE_DEVICES='0,1,5,6' accelerate launch  --num_processes 4  --multi_gpu
 --training_mode diffusion --conditioning_type text
 """
 
+
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
     tokenized_text = tokenizer(
@@ -74,6 +75,7 @@ def tokenize_text(text, tokenizer):
         return_tensors="pt",
     )
     return tokenized_text.input_ids, tokenized_text.attention_mask
+
 
 def log_validation(
     config,
@@ -147,7 +149,7 @@ def log_validation(
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state.to(dtype=weight_dtype)
-        
+
         # conditioning = text_encoder(
         #     input_ids=input_ids, attention_mask=attention_mask
         # ).to(dtype=weight_dtype)[0]
@@ -155,7 +157,9 @@ def log_validation(
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
     # Reshape conditioning for model input
-    if conditioning_type != "text":  # text embeddings would already be in the right shape
+    if (
+        conditioning_type != "text"
+    ):  # text embeddings would already be in the right shape
         conditioning = conditioning[:, None, None]  # B -> B x 1 x 1
 
     if config.unet._class_name == "UNetSpatioTemporalConditionModel":
@@ -329,6 +333,7 @@ def log_validation(
 
     return videos
 
+
 def train(
     config,
     training_mode="diffusion",  # or "flow_matching"
@@ -403,15 +408,15 @@ def train(
         else unpadf
     )
 
-    # setup text encoder and tokenizer  
+    # setup text encoder and tokenizer
     tokenizer = CLIPTokenizer.from_pretrained(config.pretrained_model_name_or_path)
     text_encoder = CLIPTextModel.from_pretrained(config.pretrained_model_name_or_path)
-    
+
     # Freeze VAE, train UNet
     vae.requires_grad_(False)
     unet.train()
-    
-    if not config.train_text_encoder: # freeze text encoder if not training it
+
+    if not config.train_text_encoder:  # freeze text encoder if not training it
         text_encoder.requires_grad_(False)
     else:
         text_encoder.train()
@@ -504,8 +509,10 @@ def train(
 
     # Prepare with accelerator
     if config.train_text_encoder:
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = (
+            accelerator.prepare(
+                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+            )
         )
     else:
         unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -528,7 +535,7 @@ def train(
     vae.to(accelerator.device, dtype=weight_dtype)
     if not config.train_text_encoder:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
-        
+
     # Recalculate training steps
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / config.gradient_accumulation_steps
@@ -643,18 +650,16 @@ def train(
                     conditioning = batch["view"].to(dtype=weight_dtype)
                 elif conditioning_type == "text":
                     # tokenize text inputs
-                    input_ids, attention_mask = tokenize_text(
-                        batch["text"], tokenizer
-                    )
+                    input_ids, attention_mask = tokenize_text(batch["text"], tokenizer)
                     # Move tensors to the correct device
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
-                    
+
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
-                        input_ids,
-                        attention_mask=attention_mask)
+                        input_ids, attention_mask=attention_mask
+                    )
                     # Properly extract the hidden states and convert to proper dtype
                     conditioning = text_outputs.last_hidden_state.to(dtype=weight_dtype)
                 else:
@@ -893,6 +898,7 @@ def train(
 
     accelerator.end_training()
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train a diffusion or flow matching model with different conditioning options"
@@ -916,22 +922,24 @@ def parse_args():
     )
     return parser.parse_args()
 
+
 if __name__ == "__main__":
     args = parse_args()
     config = OmegaConf.load(args.config)
     # Set default validation samples if not in config
     if not hasattr(config, "num_validation_samples"):
         config.num_validation_samples = 4
-    
+
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (
-        not hasattr(config, "text_encoder_path") or not hasattr(config, "tokenizer_path")
+        not hasattr(config, "text_encoder_path")
+        or not hasattr(config, "tokenizer_path")
     ):
         config.text_encoder_path = "openai/clip-vit-large-patch14"
         config.pretrained_model_name_or_path = "openai/clip-vit-large-patch14"
         config.tokenizer_path = "openai/clip-vit-large-patch14"
         config.train_text_encoder = True
-        
+
     train(
         config,
         training_mode=args.training_mode,
