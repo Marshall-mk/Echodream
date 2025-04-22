@@ -447,9 +447,9 @@ class EchoDynamicLatentAR(Dataset):
                 )  # + self.target_sequence_length
 
                 if num_frames < min_frames_needed:
-                    print(
-                        f"Skipping {latent_file}: not enough frames ({num_frames} < {min_frames_needed})"
-                    )
+                    # print(
+                    #     f"Skipping {latent_file}: not enough frames ({num_frames} < {min_frames_needed})"
+                    # )
                     continue
 
                 # Create sequence pairs
@@ -516,10 +516,9 @@ class EchoDynamicLatentAR(Dataset):
             "filename": row["FileName"],
             "prior_frames": prior_sequence,  # Now a sequence C x T x H x W
             "target_frames": target_sequence,  # Now a sequence C x T x H x W
-            "texts": lvef_text,
-            "lvef": torch.tensor(lvef, dtype=torch.float32),
+            "text": lvef_text,
+            # "lvef": torch.tensor(lvef, dtype=torch.float32),
         }
-
         if "view" in self.outputs and "View" in row:
             output["view"] = row["View"]
             # Include view in text conditioning
@@ -707,16 +706,10 @@ class CardiacNet(EchoDynamic):
 class CardiacNetLatent(EchoDynamic):
     def __init__(self, config, split=["TRAIN", "VAL", "TEST"]) -> None:
         self.config = config
-
-        # Default text template for cardiac condition
-        self.text_template = config.get(
-            "text_template", "An echocardiography video with {} condition"
-        )
-
         super().__init__(config, split, datafolder="Latents", ext=".pt")
 
         self.class_id = config.get("class_id", "ALL")  # A4C, PSAX, ALL
-
+        self.text_template = "An echocardiography video with {} condition"
         # class id mapping to class names
         self.class_name_mapping = {
             0: "Atrial Septal Defect",
@@ -835,7 +828,7 @@ class CardiacNetLatentAR(Dataset):
         target_fps=32,
         target_nframes=64,
         text_template="An echocardiography video with {} condition",
-        outputs=["text", "prior_frame", "target_frame", "class_id"],
+        outputs=["text", "prior_frame", "target_frame"],
         split=["TRAIN", "VAL", "TEST"],
         class_id="ALL",
         prior_sequence_length=64,  # Length of prior sequence
@@ -947,7 +940,10 @@ class CardiacNetLatentAR(Dataset):
             row = self.metadata.iloc[idx]
             latent_file = row["VideoPath"]
             class_id = row["class_id"]
-            class_text = self.text_template.format(int(class_id))
+            # class_text = self.text_template.format(int(class_id))
+            class_text = self.text_template.format(
+                self.class_name_mapping[class_id]
+            )
 
             try:
                 latent_video_tensor = torch.load(latent_file)  # T x C x H x W
@@ -960,9 +956,9 @@ class CardiacNetLatentAR(Dataset):
                 )  # + self.target_sequence_length
 
                 if num_frames < min_frames_needed:
-                    print(
-                        f"Skipping {latent_file}: not enough frames ({num_frames} < {min_frames_needed})"
-                    )
+                    # print(
+                    #     f"Skipping {latent_file}: not enough frames ({num_frames} < {min_frames_needed})"
+                    # )
                     continue
 
                 # Create sequence pairs
@@ -1030,14 +1026,16 @@ class CardiacNetLatentAR(Dataset):
             "prior_frames": prior_sequence,  # Now a sequence C x T x H x W
             "target_frames": target_sequence,  # Now a sequence C x T x H x W
             "text": class_text,
-            "class_id": torch.tensor(class_id, dtype=torch.float32),
+            # "class_id": torch.tensor(class_id, dtype=torch.float32),
         }
-
-        if "class_id" in self.outputs and "class_id" in row:
-            output["class_id"] = row["class_id"]
+        if "class_id" in self.outputs:
+            output["class_id"] = class_id
+            
+        if "text" in self.outputs and "class_id" in row:
+            
             # Include class_name in text conditioning
             output["text"] = (
-                f"{output['text']}, Class: {self.class_name_mapping[row['class_id']]}"
+                f"{output['text']}" #, Class: {self.class_name_mapping[row['class_id']]}
             )
 
         return output

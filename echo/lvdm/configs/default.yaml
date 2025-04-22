@@ -137,7 +137,7 @@ validation_steps: 1500
 validation_conditioning_type: text
 
 report_to: wandb
-checkpointing_steps: 10000 # ~3/hour
+checkpointing_steps: 1 # ~3/hour
 checkpoints_total_limit: 20 # no limit
 resume_from_checkpoint: latest
 tracker_project_name: echo-dream

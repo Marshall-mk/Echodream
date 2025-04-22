@@ -28,23 +28,23 @@ datasets:
         target_resolution: 14 # emb resolution
         outputs: ["text", "prior_frame", "target_frame"]
 
-    - name: CardiacNetLatentAR
+    - name: EchoDynamicLatentAR
       active: true
       params:
         root: /nfs/usrhome/khmuhammad/Echonet/data/latents/ped_a4c
         target_fps: ${globals.target_fps}
         target_nframes: ${globals.target_nframes}
         target_resolution: 14 # emb resolution
-        outputs: ["text", "prior_frame", "target_frame",]
+        outputs: ["text", "prior_frame", "target_frame", "view"]
     
-    - name: CardiacNetLatentAR
+    - name: EchoDynamicLatentAR
       active: true
       params:
         root: /nfs/usrhome/khmuhammad/Echonet/data/latents/ped_psax
         target_fps: ${globals.target_fps}
         target_nframes: ${globals.target_nframes}
         target_resolution: 14 # emb resolution
-        outputs: ["text", "prior_frame", "target_frame",]
+        outputs: ["text", "prior_frame", "target_frame", "view"]
 
 unet:
     _class_name: UNetSpatioTemporalConditionModel

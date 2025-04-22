@@ -143,11 +143,11 @@ def log_validation(
         input_ids, attention_mask = tokenize_text(
             [e["text"] for e in ref_elements], tokenizer
         )
-        input_ids = input_ids.to(accelerator.device, dtype=weight_dtype)
-        attention_mask = attention_mask.to(accelerator.device, dtype=weight_dtype)
+        input_ids = input_ids.to(accelerator.device)
+        attention_mask = attention_mask.to(accelerator.device)
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
-        ).to(dtype=weight_dtype)[0]
+        ).last_hidden_state.to(dtype=weight_dtype)
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
@@ -345,7 +345,7 @@ def train(
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         mixed_precision=config.mixed_precision,
         project_config=accelerator_project_config,
-        # log_with=config.report_to,
+        log_with=config.report_to,
     )
 
     # Basic logging setup
@@ -629,7 +629,7 @@ def train(
         mean_losses = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                # Get batch data
+                # Get batch data)
                 latents = batch["target_frames"]  # B x C x T x H x W
                 ref_frame = batch["prior_frames"]  # B x C x T x H x W
 

@@ -144,15 +144,12 @@ def log_validation(
         input_ids, attention_mask = tokenize_text(
             [e["text"] for e in ref_elements], tokenizer
         )
-        input_ids = input_ids.to(accelerator.device, dtype=weight_dtype)
-        attention_mask = attention_mask.to(accelerator.device, dtype=weight_dtype)
+        input_ids = input_ids.to(accelerator.device)
+        attention_mask = attention_mask.to(accelerator.device)
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state.to(dtype=weight_dtype)
 
-        # conditioning = text_encoder(
-        #     input_ids=input_ids, attention_mask=attention_mask
-        # ).to(dtype=weight_dtype)[0]
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
@@ -427,6 +424,14 @@ def train(
         ema_unet = EMAModel(
             ema_unet.parameters(), model_cls=unet_klass, model_config=ema_unet.config
         )
+        # Create EMA for text encoder if it's being trained
+        if config.train_text_encoder:
+            ema_text_encoder = CLIPTextModel.from_pretrained(config.pretrained_model_name_or_path)
+            ema_text_encoder = EMAModel(
+                ema_text_encoder.parameters(), 
+                model_cls=CLIPTextModel, 
+                model_config=ema_text_encoder.config
+            )
 
     # Register hooks for model saving and loading
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -437,7 +442,12 @@ def train(
                     ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
                 for i, model in enumerate(models):
-                    model.save_pretrained(os.path.join(output_dir, "unet"))
+                    # Save UNet
+                    if i == 0:  # First model is always UNet
+                        model.save_pretrained(os.path.join(output_dir, "unet"))
+                    # Save text encoder if it's being trained
+                    elif config.train_text_encoder and i == 1:  # Second model is text encoder if it exists
+                        model.save_pretrained(os.path.join(output_dir, "text_encoder"))
                     weights.pop()
 
         def load_model_hook(models, input_dir):
@@ -451,9 +461,15 @@ def train(
 
             for i in range(len(models)):
                 model = models.pop()
-                load_model = unet_klass.from_pretrained(input_dir, subfolder="unet")
-                model.register_to_config(**load_model.config)
-                model.load_state_dict(load_model.state_dict())
+                # Load text encoder if it exists and is being trained
+                if i == 0 and config.train_text_encoder and os.path.isdir(os.path.join(input_dir, "text_encoder")):
+                    load_model = CLIPTextModel.from_pretrained(input_dir, subfolder="text_encoder")
+                    model.load_state_dict(load_model.state_dict())
+                # Load UNet
+                else:
+                    load_model = unet_klass.from_pretrained(input_dir, subfolder="unet")
+                    model.register_to_config(**load_model.config)
+                    model.load_state_dict(load_model.state_dict())
                 del load_model
 
         accelerator.register_save_state_pre_hook(save_model_hook)
@@ -799,6 +815,8 @@ def train(
             if accelerator.sync_gradients:
                 if config.use_ema:
                     ema_unet.step(unet.parameters())
+                    if config.train_text_encoder:
+                        ema_text_encoder.step(text_encoder.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log(
@@ -878,6 +896,9 @@ def train(
                 if config.use_ema:
                     ema_unet.store(unet.parameters())
                     ema_unet.copy_to(unet.parameters())
+                    if config.train_text_encoder:
+                        ema_text_encoder.store(text_encoder.parameters())
+                        ema_text_encoder.copy_to(text_encoder.parameters())
 
                 log_validation(
                     config,
@@ -895,6 +916,30 @@ def train(
 
                 if config.use_ema:
                     ema_unet.restore(unet.parameters())
+                    if config.train_text_encoder:
+                        ema_text_encoder.restore(text_encoder.parameters())
+
+    # Save the final model
+    if accelerator.is_main_process:
+        # Create the pipeline using the trained modules
+        unet = accelerator.unwrap_model(unet)
+        if config.use_ema:
+            ema_unet.copy_to(unet.parameters())
+
+        # Save text encoder if it was trained
+        if config.train_text_encoder:
+            text_encoder = accelerator.unwrap_model(text_encoder)
+            if config.use_ema and hasattr(config, "ema_text_encoder") and config.ema_text_encoder:
+                ema_text_encoder.copy_to(text_encoder.parameters())
+            text_encoder.save_pretrained(os.path.join(config.output_dir, "text_encoder"))
+            tokenizer.save_pretrained(os.path.join(config.output_dir, "tokenizer"))
+
+        # Always save the UNet
+        unet.save_pretrained(os.path.join(config.output_dir, "unet"))
+
+        # Save the config
+        OmegaConf.save(config, os.path.join(config.output_dir, "config.yaml"))
+        logger.info(f"Saved models and config to {config.output_dir}")
 
     accelerator.end_training()
 
