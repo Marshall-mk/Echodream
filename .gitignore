@@ -168,3 +168,5 @@ experiments/
 wandb/
 samples/
 .vscode/
+echo/lidm
+echo/privacy
