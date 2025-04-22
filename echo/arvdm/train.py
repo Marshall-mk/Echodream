@@ -543,8 +543,12 @@ def train(
             unet, optimizer, train_dataloader, lr_scheduler
         )
 
+    # Move and prepare EMA models after accelerator preparation
     if config.use_ema:
         ema_unet.to(accelerator.device)
+        if config.train_text_encoder:
+            # Move text encoder EMA model to the same device as the text encoder
+            ema_text_encoder.to(accelerator.device)
 
     # Setup mixed precision
     weight_dtype = torch.float32
@@ -816,7 +820,11 @@ def train(
                 if config.use_ema:
                     ema_unet.step(unet.parameters())
                     if config.train_text_encoder:
-                        ema_text_encoder.step(text_encoder.parameters())
+                        # Ensure parameters are on the same device before EMA update
+                        ema_text_encoder.to(accelerator.device)
+                        # Get unwrapped text encoder if using accelerator
+                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
+                        ema_text_encoder.step(unwrapped_text_encoder.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log(
@@ -897,8 +905,12 @@ def train(
                     ema_unet.store(unet.parameters())
                     ema_unet.copy_to(unet.parameters())
                     if config.train_text_encoder:
-                        ema_text_encoder.store(text_encoder.parameters())
-                        ema_text_encoder.copy_to(text_encoder.parameters())
+                        # Ensure text encoder EMA is on the correct device
+                        ema_text_encoder.to(accelerator.device)
+                        # Get unwrapped text encoder
+                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder) 
+                        ema_text_encoder.store(unwrapped_text_encoder.parameters())
+                        ema_text_encoder.copy_to(unwrapped_text_encoder.parameters())
 
                 log_validation(
                     config,
@@ -917,7 +929,9 @@ def train(
                 if config.use_ema:
                     ema_unet.restore(unet.parameters())
                     if config.train_text_encoder:
-                        ema_text_encoder.restore(text_encoder.parameters())
+                        # Get unwrapped text encoder
+                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
+                        ema_text_encoder.restore(unwrapped_text_encoder.parameters())
 
     # Save the final model
     if accelerator.is_main_process:

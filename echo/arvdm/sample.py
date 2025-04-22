@@ -20,6 +20,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
 from diffusers import (
@@ -70,8 +71,18 @@ python echo/arlvdm/sample_flexible.py --config configs/default.yaml --unet model
 python echo/arlvdm/sample_flexible.py --config configs/default.yaml --unet models/unet --vae models/vae --conditioning data/references --output output/samples --sampling_mode diffusion --conditioning_type view --view_ids 4 --guidance_scale 3.0 --save_as gif
 """
 
+def tokenize_text(text, tokenizer):
+    """Tokenizes the input text using the provided tokenizer"""
+    tokenized_text = tokenizer(
+        text,
+        padding="max_length",
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+        return_tensors="pt",
+    )
+    return tokenized_text.input_ids, tokenized_text.attention_mask
 
-def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dtype):
+def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder):
     """
     Create conditioning vectors based on the specified type
     """
@@ -129,16 +140,75 @@ def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dt
         return cond[:, None, None]
 
     elif conditioning_type == "text":
-        # Text embeddings should already be in tensor form and properly sized
-        # This would normally come from a text encoder
-        # Here we just create a dummy tensor
-        embed_dim = 768  # Standard size for many text embeddings
-        cond = torch.randn(B, embed_dim, device=device, dtype=dtype)
-        return cond
-
+        text_templates = [
+            "An echocardiography video with {} condition",
+            "An echocardiography video with Left Ventricular Ejection Fraction {}%"
+        ]
+        class_names = [
+            "Atrial Septal Defect",
+            "Non-Atrial Septal Defect",
+            "Non-Pulmonary Arterial Hypertension",
+            "Pulmonary Arterial Hypertension",
+        ]
+        
+        # Generate random text conditioning
+        text_conditioning = []
+        for _ in range(B // 2):
+            # Randomly combine text_templates[0] with class names
+            random_class = class_names[torch.randint(0, len(class_names), (1,)).item()]
+            text_conditioning.append(text_templates[0].format(random_class))
+        
+        for _ in range(B // 2):
+            # Randomly combine text_templates[1] with a random LVEF value
+            random_lvef = torch.randint(10, 90, (1,)).item()
+            text_conditioning.append(text_templates[1].format(random_lvef))
+        
+        # Tokenize the text conditioning
+        input_ids, attention_mask = tokenize_text(text_conditioning, tokenizer)
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        conditioning = text_encoder(
+            input_ids=input_ids, attention_mask=attention_mask
+        ).last_hidden_state.to(dtype=dtype)
+        
+        return conditioning, text_conditioning
+    
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
+def load_text_encoder_and_tokenizer(text_encoder_path, tokenizer_path=None):
+    """
+    Loads the text encoder and tokenizer for text-conditioned generation.
+    
+    Args:
+        text_encoder_path: Path to the text encoder model or pretrained model name
+        tokenizer_path: Path to the tokenizer. If None, will use text_encoder_path
+    
+    Returns:
+        tuple: (text_encoder, tokenizer) - Loaded models for inference
+    """
+    if tokenizer_path is None:
+        tokenizer_path = text_encoder_path
+    
+    # Check if the paths are local directories or HF model IDs
+    if os.path.isdir(text_encoder_path):
+        # Load from local directory
+        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path)
+    else:
+        # Load from Hugging Face
+        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path)
+    
+    if os.path.isdir(tokenizer_path):
+        # Load from local directory
+        tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
+    else:
+        # Load from Hugging Face
+        tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
+    
+    print(f"Loaded text encoder from {text_encoder_path}")
+    print(f"Loaded tokenizer from {tokenizer_path}")
+    
+    return text_encoder, tokenizer
 
 if __name__ == "__main__":
     # 1 - Parse command line arguments
@@ -221,7 +291,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Use DDIM sampler (only for diffusion mode).",
     )
-
+    parser.add_argument(
+        "--text_encoder", type=str, default=None, 
+        help="Path to text encoder model (required for text conditioning)."
+    )
+    parser.add_argument(
+        "--tokenizer", type=str, default=None,
+        help="Path to tokenizer (if different from text encoder path)."
+    )
+    
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config)
@@ -229,7 +307,16 @@ if __name__ == "__main__":
     # 2 - Load models
     unet = load_model(args.unet)
     vae = load_model(args.vae)
-
+    # Load text encoder and tokenizer if using text conditioning
+    text_encoder = None
+    tokenizer = None
+    if args.conditioning_type == "text":
+        if args.text_encoder is None:
+            raise ValueError("Text encoder path must be provided for text conditioning")
+        text_encoder, tokenizer = load_text_encoder_and_tokenizer(
+            args.text_encoder, args.tokenizer
+        )
+        
     # 3 - Load or create scheduler based on sampling_mode
     if args.sampling_mode == "diffusion":
         scheduler_kwargs = OmegaConf.to_container(config.noise_scheduler)
@@ -288,7 +375,10 @@ if __name__ == "__main__":
     vae = vae.to(device, torch.float32)
     unet.eval()
     vae.eval()
-
+    text_encoder = text_encoder.to(device)
+    tokenizer = tokenizer.to(device)
+    text_encoder.eval()
+        
     format_input = (
         pad_reshape
         if config.unet._class_name == "UNetSpatioTemporalConditionModel"
@@ -312,18 +402,6 @@ if __name__ == "__main__":
     stride = args.stride
 
     fps = config.globals.target_fps if hasattr(config.globals, "target_fps") else 30
-
-    # # Stitching parameters
-    # args.frames = int(np.ceil(args.frames / 32) * 32)
-    # if args.frames > T:
-    #     OT = T // 2  # overlap 64//2
-    #     TR = (args.frames - T) / 32  # total frames (192 - 64) / 32 = 4
-    #     TR = int(TR + 1)  # total repetitions
-    #     NT = (T - OT) * TR + OT  # = args.frame
-    # else:
-    #     OT = 0
-    #     TR = 1
-    #     NT = T
 
     # Forward kwargs setup
     forward_kwargs = {
@@ -366,16 +444,17 @@ if __name__ == "__main__":
                     break
 
                 # Get conditioning based on specified type
-                conditioning = get_conditioning_vector(
-                    args.conditioning_type, conditioning_value, B, device, dtype
-                )
+                if args.conditioning_type == "text":
+                    conditioning, text_conditioning = get_conditioning_vector(
+                        args.conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder
+                    )
+                else:
+                    conditioning = get_conditioning_vector(
+                        args.conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder
+                    )
 
                 # Set the correct keyword argument based on conditioning type
-                if args.conditioning_type == "text":
-                    forward_kwargs["encoder_hidden_states"] = conditioning
-                else:
-                    # For class_id, lvef, and view
-                    forward_kwargs[f"{args.conditioning_type}"] = conditioning
+                forward_kwargs["encoder_hidden_states"] = conditioning
 
                 # Prepare reference frames
                 latent_cond_images = cond.to(device, torch.float32)
@@ -486,7 +565,7 @@ if __name__ == "__main__":
                 elif args.conditioning_type == "view":
                     cond_values = conditioning.squeeze().to(torch.int).tolist()
                 else:  # text
-                    cond_values = [0] * B  # Placeholder for text conditioning
+                    cond_values = text_conditioning # This will be a list of strings
 
                 # save samples
                 for j in range(B):
