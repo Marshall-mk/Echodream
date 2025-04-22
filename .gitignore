@@ -1,0 +1,8 @@
+# large files and folders
+.DS_Store
+wand/
+experiments/
+models/
+samples/
+echo/lidm
+echo/privacy
