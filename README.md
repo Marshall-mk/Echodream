@@ -178,7 +178,7 @@ models
 ```
 
 <!-- </details> -->
-## TRAINIG
+## TRAINING
 <!-- <details open id="training">
 <summary style="font-size: 1.5em; font-weight: bold;">Training the video models<hr></summary> -->
 We trained two video models, one with text conditioning and the other with class conditioning on only the cardiacnet dataset
