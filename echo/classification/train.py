@@ -18,7 +18,6 @@ warnings.filterwarnings("ignore")
 from echo.classification.model import get_video_classifier
 from echo.classification.data import create_video_dataloaders
 import imageio
-from echo.common import save_as_mp4
 
 
 def train_epoch(model, dataloader, criterion, optimizer, accelerator, epoch):
@@ -192,6 +191,19 @@ def parse_args():
         choices=["train", "val", "test"],
         help="Which splits should use synthetic data",
     )
+    parser.add_argument(
+        "--sampling_rate",
+        type=int,
+        default=1,
+        help="Sampling rate for frames (1 means all frames, 2 means every second frame, etc.)",
+    )
+    parser.add_argument(
+        "--selected_classes",
+        type=str,
+        nargs="+",
+        default=None,
+        help="List of selected classes to include in the dataset",
+    )
 
     # Model parameters
     parser.add_argument(
@@ -315,6 +327,8 @@ def main():
         "num_workers": args.num_workers,
         "frames_per_clip": args.frames_per_clip,
         "frame_sampling": args.frame_sampling,
+        "sampling_rate": args.sampling_rate,
+        "selected_classes": args.selected_classes,
         "synthetic_csv_path": args.synthetic_csv_path,
         "synthetic_data_dir": args.synthetic_data_dir,
         "use_synthetic_for": args.use_synthetic_for,

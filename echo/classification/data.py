@@ -23,9 +23,11 @@ class VideoDataset(Dataset):
         transform=None,
         frames_per_clip: int = 64,
         frame_sampling: str = "uniform",
+        sampling_rate: int = 1,
         synthetic_csv_path: Optional[str] = None,
         synthetic_data_dir: Optional[str] = None,
         use_synthetic_for_split: Optional[List[str]] = None,
+        selected_classes: Optional[List[str]] = None,
     ):
         """
         Initialize the dataset.
@@ -37,15 +39,19 @@ class VideoDataset(Dataset):
             transform: Optional transform to apply to the frames
             frames_per_clip: Number of frames to sample from each video
             frame_sampling: Method for sampling frames ('uniform', 'random')
+            sampling_rate: Take every Nth frame (default=1 for all frames)
             synthetic_csv_path: Path to the CSV file with synthetic video metadata
             synthetic_data_dir: Directory containing the synthetic video frames
             use_synthetic_for_split: Which splits should use synthetic data ('train', 'val', 'test')
+            selected_classes: List of class names to include (if None, include all classes)
         """
         self.data_dir = data_dir
         self.split = split
         self.transform = transform if transform is not None else transforms.ToTensor()
         self.frames_per_clip = frames_per_clip
         self.frame_sampling = frame_sampling
+        self.sampling_rate = sampling_rate
+        self.selected_classes = selected_classes
 
         # Set up synthetic data configuration
         self.use_synthetic = (
@@ -69,10 +75,32 @@ class VideoDataset(Dataset):
                 drop=True
             )
             self.df = synthetic_df
+            
+        # Filter by selected classes if provided
+        if self.selected_classes is not None:
+            # Handle case where selected_classes is a list containing a comma-separated string
+            if len(self.selected_classes) == 1 and ',' in self.selected_classes[0]:
+                self.selected_classes = self.selected_classes[0].split(',')
+                
+            # Try to convert string representations of integers to integers if needed
+            class_filters = []
+            for cls in self.selected_classes:
+                try:
+                    # If the class ID is a string representation of a number, convert it
+                    class_filters.append(int(cls))
+                except (ValueError, TypeError):
+                    # If it's not convertible to int, keep it as is
+                    class_filters.append(cls)
+            # Filter the dataframe by class_id
+            self.df = self.df[self.df["class_id"].isin(class_filters)].reset_index(drop=True)
+            if len(self.df) == 0:
+                raise ValueError(f"No samples found for selected classes {self.selected_classes} in split {split}. " 
+                                 f"Available classes are: {sorted(set(df[df['Split'] == split]['class_id'].tolist()))}")
 
         # Create class to index mapping
         self.classes = sorted(self.df["class_name"].unique())
         self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
+
 
         # Calculate class weights
         self._calculate_class_weights()
@@ -147,6 +175,12 @@ class VideoDataset(Dataset):
         #     [f for f in os.listdir(video_dir) if f.endswith(('.jpg', '.png'))],
         #     key=lambda x: int(os.path.splitext(x)[0])
         # )
+        
+        # Apply sampling rate by selecting every nth frame
+        if hasattr(self, 'sampling_rate') and self.sampling_rate > 1:
+            available_frames = available_frames[::self.sampling_rate]
+            num_frames = len(available_frames)
+            
         if num_frames < self.frames_per_clip:
             # If we have fewer frames than needed, duplicate frames
             frame_indices = np.linspace(
@@ -246,6 +280,7 @@ def create_video_dataloaders(
             - num_workers: Number of workers for dataloaders
             - frames_per_clip: Number of frames to sample per video
             - frame_sampling: Method for sampling frames
+            - sampling_rate: Take every Nth frame (default=1 for all frames)
             - synthetic_csv_path: Path to CSV file with synthetic data (optional)
             - synthetic_data_dir: Directory with synthetic data (optional)
             - use_synthetic_for: Which splits should use synthetic data ('train', 'val', 'test')
@@ -261,12 +296,13 @@ def create_video_dataloaders(
     num_workers = config.get("num_workers", 4)
     frames_per_clip = config.get("frames_per_clip", 16)
     frame_sampling = config.get("frame_sampling", "uniform")
+    sampling_rate = config.get("sampling_rate", 1)
+    selected_classes = config.get("selected_classes", None)
     synthetic_csv_path = config.get("synthetic_csv_path")
     synthetic_data_dir = config.get("synthetic_data_dir")
     use_synthetic_for = config.get("use_synthetic_for", [])
-    pin_memory = config.get(
-        "pin_memory", False
-    )  # Default to False to avoid CUDA errors
+    pin_memory = config.get("pin_memory", False)
+    
 
     # Create transforms
     train_transform = get_video_transforms("train")
@@ -281,9 +317,11 @@ def create_video_dataloaders(
         transform=train_transform,
         frames_per_clip=frames_per_clip,
         frame_sampling=frame_sampling,
+        sampling_rate=sampling_rate,
         synthetic_csv_path=synthetic_csv_path,
         synthetic_data_dir=synthetic_data_dir,
         use_synthetic_for_split=use_synthetic_for,
+        selected_classes=selected_classes,
     )
 
     val_dataset = VideoDataset(
@@ -293,9 +331,11 @@ def create_video_dataloaders(
         transform=val_transform,
         frames_per_clip=frames_per_clip,
         frame_sampling=frame_sampling,
+        sampling_rate=sampling_rate,
         synthetic_csv_path=synthetic_csv_path,
         synthetic_data_dir=synthetic_data_dir,
         use_synthetic_for_split=use_synthetic_for,
+        selected_classes=selected_classes,
     )
 
     test_dataset = VideoDataset(
@@ -305,9 +345,11 @@ def create_video_dataloaders(
         transform=test_transform,
         frames_per_clip=frames_per_clip,
         frame_sampling=frame_sampling,
+        sampling_rate=sampling_rate,
         synthetic_csv_path=synthetic_csv_path,
         synthetic_data_dir=synthetic_data_dir,
         use_synthetic_for_split=use_synthetic_for,
+        selected_classes=selected_classes,
     )
 
     # Create dataloaders
