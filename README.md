@@ -163,9 +163,9 @@ python scripts/6video_to_jpg.py \
 
 You can download the pretrained VAE from [here](https://huggingface.co/HReynaud/EchoNet-Synthetic/tree/main/vae)
 
-### The LVDM
+### The LVDMS
 
-You can download the pretrained LVDMS from [here](https://xx) or train it yourself by following the instructions in the [LVDM training](echo/lvdm/README.md) section.
+You can download the pretrained LVDMS from [here](https://xx) or train it yourself by following the instructions in the [LVDM training](#training) section.
 
 ### Structure
 
@@ -181,7 +181,7 @@ models
 ## TRAINING
 <!-- <details open id="training">
 <summary style="font-size: 1.5em; font-weight: bold;">Training the video models<hr></summary> -->
-We trained two video models, one with text conditioning and the other with class conditioning on only the cardiacnet dataset
+We trained two video models, one with text conditioning on all datasets and another with class conditioning on only the cardiacnet dataset.
 
 ```bash
 # 	WITH TEXT CONDITIONING

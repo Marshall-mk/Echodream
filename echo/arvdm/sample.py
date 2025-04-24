@@ -375,9 +375,10 @@ if __name__ == "__main__":
     vae = vae.to(device, torch.float32)
     unet.eval()
     vae.eval()
-    text_encoder = text_encoder.to(device)
-    tokenizer = tokenizer.to(device)
-    text_encoder.eval()
+    if text_encoder is not None:
+        text_encoder = text_encoder.to(device)
+        tokenizer = tokenizer.to(device)
+        text_encoder.eval()
         
     format_input = (
         pad_reshape
