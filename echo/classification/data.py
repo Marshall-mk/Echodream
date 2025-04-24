@@ -75,13 +75,13 @@ class VideoDataset(Dataset):
                 drop=True
             )
             self.df = synthetic_df
-            
+
         # Filter by selected classes if provided
         if self.selected_classes is not None:
             # Handle case where selected_classes is a list containing a comma-separated string
-            if len(self.selected_classes) == 1 and ',' in self.selected_classes[0]:
-                self.selected_classes = self.selected_classes[0].split(',')
-                
+            if len(self.selected_classes) == 1 and "," in self.selected_classes[0]:
+                self.selected_classes = self.selected_classes[0].split(",")
+
             # Try to convert string representations of integers to integers if needed
             class_filters = []
             for cls in self.selected_classes:
@@ -92,15 +92,18 @@ class VideoDataset(Dataset):
                     # If it's not convertible to int, keep it as is
                     class_filters.append(cls)
             # Filter the dataframe by class_id
-            self.df = self.df[self.df["class_id"].isin(class_filters)].reset_index(drop=True)
+            self.df = self.df[self.df["class_id"].isin(class_filters)].reset_index(
+                drop=True
+            )
             if len(self.df) == 0:
-                raise ValueError(f"No samples found for selected classes {self.selected_classes} in split {split}. " 
-                                 f"Available classes are: {sorted(set(df[df['Split'] == split]['class_id'].tolist()))}")
+                raise ValueError(
+                    f"No samples found for selected classes {self.selected_classes} in split {split}. "
+                    f"Available classes are: {sorted(set(df[df['Split'] == split]['class_id'].tolist()))}"
+                )
 
         # Create class to index mapping
         self.classes = sorted(self.df["class_name"].unique())
         self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
-
 
         # Calculate class weights
         self._calculate_class_weights()
@@ -175,12 +178,12 @@ class VideoDataset(Dataset):
         #     [f for f in os.listdir(video_dir) if f.endswith(('.jpg', '.png'))],
         #     key=lambda x: int(os.path.splitext(x)[0])
         # )
-        
+
         # Apply sampling rate by selecting every nth frame
-        if hasattr(self, 'sampling_rate') and self.sampling_rate > 1:
-            available_frames = available_frames[::self.sampling_rate]
+        if hasattr(self, "sampling_rate") and self.sampling_rate > 1:
+            available_frames = available_frames[:: self.sampling_rate]
             num_frames = len(available_frames)
-            
+
         if num_frames < self.frames_per_clip:
             # If we have fewer frames than needed, duplicate frames
             frame_indices = np.linspace(
@@ -302,7 +305,6 @@ def create_video_dataloaders(
     synthetic_data_dir = config.get("synthetic_data_dir")
     use_synthetic_for = config.get("use_synthetic_for", [])
     pin_memory = config.get("pin_memory", False)
-    
 
     # Create transforms
     train_transform = get_video_transforms("train")

@@ -941,9 +941,7 @@ class CardiacNetLatentAR(Dataset):
             latent_file = row["VideoPath"]
             class_id = row["class_id"]
             # class_text = self.text_template.format(int(class_id))
-            class_text = self.text_template.format(
-                self.class_name_mapping[class_id]
-            )
+            class_text = self.text_template.format(self.class_name_mapping[class_id])
 
             try:
                 latent_video_tensor = torch.load(latent_file)  # T x C x H x W
@@ -1030,12 +1028,11 @@ class CardiacNetLatentAR(Dataset):
         }
         if "class_id" in self.outputs:
             output["class_id"] = class_id
-            
+
         if "text" in self.outputs and "class_id" in row:
-            
             # Include class_name in text conditioning
             output["text"] = (
-                f"{output['text']}" #, Class: {self.class_name_mapping[row['class_id']]}
+                f"{output['text']}"  # , Class: {self.class_name_mapping[row['class_id']]}
             )
 
         return output

@@ -177,6 +177,10 @@ def log_validation(
     )
 
     logger.info("Sampling... ")
+    # Track validation loss
+    val_loss = 0.0
+    val_count = 0
+
     with torch.no_grad(), torch.autocast("cuda"):
         # prepare model inputs
         B, C, T, H, W = (
@@ -236,6 +240,19 @@ def log_validation(
                     )
 
                 latents = scheduler.step(noise_pred, t, latents).prev_sample
+
+                # Calculate validation loss
+                try:
+                    target = latents
+                    loss = F.mse_loss(
+                        noise_pred.float(), target.float(), reduction="none"
+                    )
+                    val_loss += loss.mean().item()
+                    val_count += 1
+                except Exception as e:
+                    logger.error(f"Error during validation loss calculation: {e}")
+                    val_loss += 0.0
+                    val_count += 1
         else:
             # Flow matching sampling (simplified)
             t_steps = torch.linspace(
@@ -266,6 +283,19 @@ def log_validation(
 
                 # Euler step
                 latents = latents - velocity_pred * dt
+
+                # Calculate validation loss
+                try:
+                    target = latents
+                    loss = F.mse_loss(
+                        velocity_pred.float(), target.float(), reduction="none"
+                    )
+                    val_loss += loss.mean().item()
+                    val_count += 1
+                except Exception as e:
+                    logger.error(f"Error during validation loss calculation: {e}")
+                    val_loss += 0.0
+                    val_count += 1
 
     # VAE decoding (simplified)
     with torch.no_grad():
@@ -316,7 +346,8 @@ def log_validation(
                 {
                     "validation_videos": wandb.Video(
                         videos, caption=f"Epoch {epoch}", fps=config.validation_fps
-                    )
+                    ),
+                    "validation_loss": val_loss / val_count,
                 }
             )
             logger.info("Samples sent to wandb.")
@@ -423,11 +454,13 @@ def train(
         )
         # Create EMA for text encoder if it's being trained
         if config.train_text_encoder:
-            ema_text_encoder = CLIPTextModel.from_pretrained(config.pretrained_model_name_or_path)
+            ema_text_encoder = CLIPTextModel.from_pretrained(
+                config.pretrained_model_name_or_path
+            )
             ema_text_encoder = EMAModel(
-                ema_text_encoder.parameters(), 
-                model_cls=CLIPTextModel, 
-                model_config=ema_text_encoder.config
+                ema_text_encoder.parameters(),
+                model_cls=CLIPTextModel,
+                model_config=ema_text_encoder.config,
             )
 
     # Register hooks for model saving and loading
@@ -439,14 +472,18 @@ def train(
                     ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
                     # Save text encoder EMA if it's being trained
                     if config.train_text_encoder:
-                        ema_text_encoder.save_pretrained(os.path.join(output_dir, "text_encoder_ema"))
+                        ema_text_encoder.save_pretrained(
+                            os.path.join(output_dir, "text_encoder_ema")
+                        )
 
                 for i, model in enumerate(models):
                     # Save UNet
                     if i == 0:  # First model is always UNet
                         model.save_pretrained(os.path.join(output_dir, "unet"))
                     # Save text encoder if it's being trained
-                    elif config.train_text_encoder and i == 1:  # Second model is text encoder if it exists
+                    elif (
+                        config.train_text_encoder and i == 1
+                    ):  # Second model is text encoder if it exists
                         model.save_pretrained(os.path.join(output_dir, "text_encoder"))
                     weights.pop()
 
@@ -458,9 +495,11 @@ def train(
                 ema_unet.load_state_dict(load_model.state_dict())
                 ema_unet.to(accelerator.device)
                 del load_model
-                
+
                 # Load text encoder EMA if it exists and is being trained
-                if config.train_text_encoder and os.path.isdir(os.path.join(input_dir, "text_encoder_ema")):
+                if config.train_text_encoder and os.path.isdir(
+                    os.path.join(input_dir, "text_encoder_ema")
+                ):
                     load_model = EMAModel.from_pretrained(
                         os.path.join(input_dir, "text_encoder_ema"), CLIPTextModel
                     )
@@ -471,8 +510,14 @@ def train(
             for i in range(len(models)):
                 model = models.pop()
                 # Load text encoder if it exists and is being trained
-                if i == 0 and config.train_text_encoder and os.path.isdir(os.path.join(input_dir, "text_encoder")):
-                    load_model = CLIPTextModel.from_pretrained(input_dir, subfolder="text_encoder")
+                if (
+                    i == 0
+                    and config.train_text_encoder
+                    and os.path.isdir(os.path.join(input_dir, "text_encoder"))
+                ):
+                    load_model = CLIPTextModel.from_pretrained(
+                        input_dir, subfolder="text_encoder"
+                    )
                     model.load_state_dict(load_model.state_dict())
                 # Load UNet
                 else:
@@ -908,7 +953,7 @@ def train(
                         # Ensure text encoder EMA is on the correct device
                         ema_text_encoder.to(accelerator.device)
                         # Get unwrapped text encoder
-                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder) 
+                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
                         ema_text_encoder.store(unwrapped_text_encoder.parameters())
                         ema_text_encoder.copy_to(unwrapped_text_encoder.parameters())
 
@@ -945,7 +990,9 @@ def train(
             text_encoder = accelerator.unwrap_model(text_encoder)
             if config.use_ema:
                 ema_text_encoder.copy_to(text_encoder.parameters())
-            text_encoder.save_pretrained(os.path.join(config.output_dir, "text_encoder"))
+            text_encoder.save_pretrained(
+                os.path.join(config.output_dir, "text_encoder")
+            )
             tokenizer.save_pretrained(os.path.join(config.output_dir, "tokenizer"))
 
         # Always save the UNet
