@@ -15,10 +15,15 @@ args = parser.parse_args()
 df = pd.read_csv(args.input)
 
 # Add class_id column based on CondValue
-df["class_id"] = df["CondValue"].map({0: 0, 100: 1, 200: 2})
+df["class_id"] = df["CondValue"]
 
 # Add class_name column based on class_id
-df["class_name"] = df["class_id"].map({0: "Normal", 1: "ASD", 2: "PAH"})
+df["class_name"] = df["class_id"].map({
+            0: "Atrial Septal Defect",
+            1: "Non-Atrial Septal Defect",
+            2: "Non-Pulmonary Arterial Hypertension",
+            3: "Pulmonary Arterial Hypertension",
+        })
 
 # Save the modified dataframe to a new CSV file
 df.to_csv(args.output, index=False)

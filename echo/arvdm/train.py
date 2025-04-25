@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 import numpy as np
 from tqdm.auto import tqdm
 from packaging import version
+from skimage.metrics import structural_similarity
 from functools import partial
 from copy import deepcopy
 
@@ -73,6 +74,64 @@ def tokenize_text(text, tokenizer):
         return_tensors="pt",
     )
     return tokenized_text.input_ids, tokenized_text.attention_mask
+
+
+def compute_validation_metrics(generated_videos, reference_videos):
+    """Compute validation metrics between generated and reference videos."""
+    metrics = {}
+    
+    # Calculate SSIM
+    ssim_values = []
+    for i in range(len(generated_videos)):
+        ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
+        ssim_values.append(ssim_val)
+    metrics['ssim'] = np.mean(ssim_values)
+    
+    # Calculate PSNR
+    psnr_values = []
+    for i in range(len(generated_videos)):
+        psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
+        psnr_values.append(psnr_val)
+    metrics['psnr'] = np.mean(psnr_values)
+    
+    # You could add other metrics like FID if you have a pretrained model
+    
+    return metrics
+
+
+def calculate_ssim(generated_video, reference_video):
+    """Calculate SSIM between two videos."""
+    # Convert to numpy arrays
+    generated_video = generated_video.numpy()
+    reference_video = reference_video.numpy()
+    
+    # Calculate SSIM for each frame
+    ssim_values = []
+    for i in range(generated_video.shape[0]):
+        ssim_val = structural_similarity(
+            generated_video[i], reference_video[i], multichannel=True
+        )
+        ssim_values.append(ssim_val)
+    
+    return np.mean(ssim_values)
+
+def calculate_psnr(generated_video, reference_video):
+    """Calculate PSNR between two videos."""
+    # Convert to numpy arrays
+    generated_video = generated_video.numpy()
+    reference_video = reference_video.numpy()
+    
+    # Calculate PSNR for each frame
+    psnr_values = []
+    for i in range(generated_video.shape[0]):
+        mse = np.mean((generated_video[i] - reference_video[i]) ** 2)
+        if mse == 0:
+            psnr_values.append(float("inf"))
+        else:
+            psnr_val = 20 * np.log10(255.0 / np.sqrt(mse))
+            psnr_values.append(psnr_val)
+    
+    return np.mean(psnr_values)
 
 
 def log_validation(
@@ -177,10 +236,6 @@ def log_validation(
     )
 
     logger.info("Sampling... ")
-    # Track validation loss
-    val_loss = 0.0
-    val_count = 0
-
     with torch.no_grad(), torch.autocast("cuda"):
         # prepare model inputs
         B, C, T, H, W = (
@@ -240,19 +295,6 @@ def log_validation(
                     )
 
                 latents = scheduler.step(noise_pred, t, latents).prev_sample
-
-                # Calculate validation loss
-                try:
-                    target = latents
-                    loss = F.mse_loss(
-                        noise_pred.float(), target.float(), reduction="none"
-                    )
-                    val_loss += loss.mean().item()
-                    val_count += 1
-                except Exception as e:
-                    logger.error(f"Error during validation loss calculation: {e}")
-                    val_loss += 0.0
-                    val_count += 1
         else:
             # Flow matching sampling (simplified)
             t_steps = torch.linspace(
@@ -283,19 +325,6 @@ def log_validation(
 
                 # Euler step
                 latents = latents - velocity_pred * dt
-
-                # Calculate validation loss
-                try:
-                    target = latents
-                    loss = F.mse_loss(
-                        velocity_pred.float(), target.float(), reduction="none"
-                    )
-                    val_loss += loss.mean().item()
-                    val_count += 1
-                except Exception as e:
-                    logger.error(f"Error during validation loss calculation: {e}")
-                    val_loss += 0.0
-                    val_count += 1
 
     # VAE decoding (simplified)
     with torch.no_grad():
@@ -328,7 +357,11 @@ def log_validation(
         ref_videos = ref_videos.clamp(0, 255).to(torch.uint8).cpu()
         if val_vae.__class__.__name__ == "AutoencoderKL":  # is 2D
             ref_videos = rearrange(ref_videos, "(b t) c h w -> b c t h w", b=B)
-
+        try:
+            metrics = compute_validation_metrics(videos, ref_videos)
+        except Exception as e:
+            logger.error(f"Error computing validation metrics: {e}")
+            metrics = {}
         videos = torch.cat(
             [ref_frames, ref_videos, videos], dim=3
         )  # B x C x T x (3 H) x W // vertical concat
@@ -347,7 +380,7 @@ def log_validation(
                     "validation_videos": wandb.Video(
                         videos, caption=f"Epoch {epoch}", fps=config.validation_fps
                     ),
-                    "validation_loss": val_loss / val_count,
+                    **metrics
                 }
             )
             logger.info("Samples sent to wandb.")
@@ -726,7 +759,14 @@ def train(
                     # Move tensors to the correct device
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
-
+                    
+                    # Add a seed reset before processing text through CLIP to avoid 
+                    # potential RNG state corruption across processes
+                    if torch.distributed.is_initialized():
+                        # Manually reset seed to avoid mt19937 state corruption
+                        torch.manual_seed(1000 + global_step)
+                        if torch.cuda.is_available():
+                            torch.cuda.manual_seed_all(1000 + global_step)
                     # encode text inputs through CLIP
                     text_outputs = text_encoder(
                         input_ids, attention_mask=attention_mask

@@ -12,6 +12,11 @@ from pathlib import Path
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 import warnings
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve, average_precision_score, f1_score, precision_score, recall_score
+from sklearn.preprocessing import label_binarize
+import seaborn as sns
+from itertools import cycle
 
 warnings.filterwarnings("ignore")
 
@@ -153,6 +158,126 @@ def test(model, dataloader, accelerator):
         print(f"Test Acc: {acc_tensor.item():.2f}%")
 
     return acc_tensor.item(), all_preds, all_targets
+
+
+def calculate_and_plot_metrics(all_preds, all_targets, classes, output_dir):
+    """
+    Calculate and plot metrics for model evaluation
+    
+    Args:
+        all_preds: numpy array of model predictions
+        all_targets: numpy array of true labels
+        classes: list of class names
+        output_dir: directory to save plots
+    """
+    metrics_dir = output_dir / "metrics"
+    metrics_dir.mkdir(exist_ok=True)
+    
+    # Convert to numpy arrays if not already
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    
+    # 1. Confusion Matrix
+    cm = confusion_matrix(all_targets, all_preds)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(metrics_dir / "confusion_matrix.png", dpi=300)
+    plt.close()
+    
+    # 2. Calculate metrics
+    accuracy = np.mean(all_preds == all_targets)
+    precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+    
+    metrics = {
+        'accuracy': float(accuracy),
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1_score': float(f1)
+    }
+    
+    # Save metrics to file
+    with open(metrics_dir / "metrics.json", "w") as f:
+        json.dump(metrics, f, indent=4)
+    
+    # 3. ROC curve and AUC (one vs rest for multiclass)
+    n_classes = len(classes)
+    
+    # Check if we need to compute ROC curves (need probabilistic outputs)
+    if n_classes > 2:  # Multiclass case
+        # For demonstration, we'll create a dummy probabilistic output
+        # In a real scenario, you would need to capture model.predict_proba() results
+        
+        # Binarize the labels for one-vs-rest ROC
+        y_bin = label_binarize(all_targets, classes=range(n_classes))
+        
+        plt.figure(figsize=(10, 8))
+        
+        # For each class, calculate class-specific metrics
+        class_metrics = {}
+        for i in range(n_classes):
+            # Create binary labels for this class
+            y_true_bin = (all_targets == i).astype(np.int32)
+            y_pred_bin = (all_preds == i).astype(np.int32)
+            
+            # Calculate AUC using the binary predictions
+            fpr, tpr, _ = roc_curve(y_true_bin, y_pred_bin)
+            roc_auc = auc(fpr, tpr)
+            
+            # Plot ROC curve
+            plt.plot(fpr, tpr, lw=2, label=f'Class {classes[i]} (AUC = {roc_auc:.2f})')
+            
+            # Store class metrics
+            class_metrics[classes[i]] = {
+                'precision': float(precision_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'recall': float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'f1_score': float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'auc': float(roc_auc)
+            }
+        
+        # Save class-specific metrics
+        with open(metrics_dir / "class_metrics.json", "w") as f:
+            json.dump(class_metrics, f, indent=4)
+        
+        plt.plot([0, 1], [0, 1], 'k--', lw=2)
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('One-vs-Rest ROC Curves')
+        plt.legend(loc="lower right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(metrics_dir / "roc_curves.png", dpi=300)
+        plt.close()
+    
+    # 4. Class distribution
+    plt.figure(figsize=(12, 6))
+    
+    # True distribution
+    plt.subplot(1, 2, 1)
+    sns.countplot(x=all_targets, palette='viridis')
+    plt.title('True Class Distribution')
+    plt.xlabel('Class')
+    plt.xticks(range(len(classes)), classes, rotation=45, ha='right')
+    
+    # Predicted distribution
+    plt.subplot(1, 2, 2)
+    sns.countplot(x=all_preds, palette='viridis')
+    plt.title('Predicted Class Distribution')
+    plt.xlabel('Class')
+    plt.xticks(range(len(classes)), classes, rotation=45, ha='right')
+    
+    plt.tight_layout()
+    plt.savefig(metrics_dir / "class_distribution.png", dpi=300)
+    plt.close()
+    
+    return metrics
 
 
 def parse_args():
@@ -473,6 +598,12 @@ def main():
             targets=all_targets,
             accuracy=test_acc,
         )
+        
+        # Calculate and plot metrics
+        classes = dataloaders["train"].dataset.classes
+        metrics = calculate_and_plot_metrics(all_preds, all_targets, classes, output_dir)
+        print(f"Metrics calculated and saved to {output_dir / 'metrics'}")
+        print(f"Overall metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}")
 
         print(f"Training completed. Best validation accuracy: {best_val_acc:.2f}%")
         print(f"Test accuracy: {test_acc:.2f}%")
