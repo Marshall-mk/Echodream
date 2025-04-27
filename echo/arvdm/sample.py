@@ -30,7 +30,7 @@ from diffusers import (
     UNetSpatioTemporalConditionModel,
 )
 
-from echo.common.datasets import TensorSetv2, ImageSet
+from echo.common.datasets import TensorSetv3, ImageSet
 from echo.common import (
     pad_reshape,
     unpad_reshape,
@@ -348,7 +348,7 @@ if __name__ == "__main__":
         f"Conditioning files must be either .pt, .jpg or .png, not {file_ext}"
     )
     if file_ext == "pt":
-        dataset = TensorSetv2(args.conditioning)
+        dataset = TensorSetv3(args.conditioning, num_frames=64, split=["TEST"])
     else:
         dataset = ImageSet(args.conditioning, ext=file_ext)
     assert len(dataset) > 0, (
@@ -472,11 +472,12 @@ if __name__ == "__main__":
                 all_frames = []
 
                 # Initialize conditioning frames - expand to match the expected dimensions
-                latent_cond_images = latent_cond_images.squeeze(1)
-                conditioning_frames = latent_cond_images[:, :, None, :, :].repeat(
-                    1, 1, prior_frames, 1, 1
-                )  # B x C x T x H x W
+                # latent_cond_images = latent_cond_images.squeeze(1)
+                # conditioning_frames = latent_cond_images[:, :, None, :, :].repeat(
+                #     1, 1, prior_frames, 1, 1
+                # )  # B x C x T x H x W
                 # Apply classifier-free guidance if specified
+                conditioning_frames = latent_cond_images.permute(0, 2, 1, 3, 4)  # B x C x T x H x W
                 use_guidance = args.guidance_scale > 1.0
                 # Generate frames autoregressively with the specified stride
                 for frame_idx in range(0, total_frames, stride):

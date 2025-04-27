@@ -1219,7 +1219,18 @@ class TensorSetv2(Dataset):
     def __init__(self, root, num_frames=1):
         self.root = root
         self.num_frames = num_frames
-        self.all_tensors = glob(os.path.join(root, "*.pt"))
+        self.all_tensors = [
+            path for path in glob(os.path.join(root, "*.pt"))
+            if self._has_enough_frames(path)
+        ]
+
+    def _has_enough_frames(self, path):
+        try:
+            tensor = torch.load(path, map_location="cpu")
+            return tensor.size(0) >= self.num_frames
+        except Exception as e:
+            print(f"Error loading tensor {path}: {e}")
+            return False
 
     def __len__(self):
         return len(self.all_tensors)
@@ -1227,6 +1238,34 @@ class TensorSetv2(Dataset):
     def __getitem__(self, idx):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
         return tensor[: self.num_frames]
+
+class TensorSetv3(Dataset):
+    def __init__(self, root, num_frames=1, ext=".pt", split=["TRAIN", "VAL", "TEST"], csv_file="FileList.csv"):
+        self.root = root
+        self.num_frames = num_frames
+        self.split = split
+        self.csv_file = os.path.join(os.path.dirname(root), csv_file)
+        self.ext = ext
+
+        # Load metadata from CSV
+        self.metadata = pd.read_csv(self.csv_file)
+        self.metadata = self.metadata[self.metadata["Split"].isin(split)]
+        self.metadata = self.metadata[self.metadata["NumberOfFrames"] >= num_frames]
+        self.metadata.reset_index(inplace=True, drop=True)
+
+        # Filter tensors based on metadata and add appropriate extensions
+        self.all_tensors = []
+        for _, row in self.metadata.iterrows():
+            file_path = os.path.join(root, row["FileName"] + ext)
+            if os.path.exists(file_path):
+                self.all_tensors.append(file_path)
+
+    def __len__(self):
+        return len(self.all_tensors)
+
+    def __getitem__(self, idx):
+        tensor = torch.load(self.all_tensors[idx], map_location="cpu")
+        return tensor[: self.num_frames] 
 
 
 class SimaseUSVideoDataset(Dataset):

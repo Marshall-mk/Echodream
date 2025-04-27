@@ -30,7 +30,7 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from echo.common.datasets import TensorSet, ImageSet, TensorSetv2
+from echo.common.datasets import TensorSet, ImageSet, TensorSetv3
 from echo.common import (
     pad_reshape,
     unpad_reshape,
@@ -357,7 +357,7 @@ if __name__ == "__main__":
         f"Conditioning files must be either .pt, .jpg or .png, not {file_ext}"
     )
     if file_ext == "pt":
-        dataset = TensorSetv2(args.conditioning)
+        dataset = TensorSetv3(args.conditioning, num_frames=1, split=["TEST"])
     else:
         dataset = ImageSet(args.conditioning, ext=file_ext)
     assert len(dataset) > 0, (

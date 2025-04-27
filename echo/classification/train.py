@@ -17,11 +17,14 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_c
 from sklearn.preprocessing import label_binarize
 import seaborn as sns
 from itertools import cycle
+from sklearn.model_selection import KFold
+import pandas as pd
+
 
 warnings.filterwarnings("ignore")
 
 from echo.classification.model import get_video_classifier
-from echo.classification.data import create_video_dataloaders
+from echo.classification.data import create_video_dataloaders, VideoDataset
 import imageio
 
 
@@ -356,6 +359,19 @@ def parse_args():
         choices=["avg", "max", "attention"],
         help="Type of temporal pooling",
     )
+    
+    # Cross-validation options
+    parser.add_argument(
+        "--use-cross-val",
+        action="store_true",
+        help="Use cross-validation instead of fixed validation set",
+    )
+    parser.add_argument(
+        "--num-folds",
+        type=int,
+        default=5,
+        help="Number of folds for cross-validation",
+    )
 
     # Training hyperparameters
     parser.add_argument(
@@ -363,7 +379,7 @@ def parse_args():
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument(
-        "--lr", type=float, default=0.0001, help="Initial learning rate"
+        "--lr", type=float, default=0.0005, help="Initial learning rate"
     )
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument(
@@ -408,6 +424,278 @@ def parse_args():
     return parser.parse_args()
 
 
+def train_and_evaluate_cv_fold(fold_idx, train_dataset, val_dataset, test_dataset, args, output_dir, accelerator):
+    """
+    Train and evaluate a single fold in the cross-validation process
+    
+    Args:
+        fold_idx: Current fold index
+        train_dataset: Training dataset for this fold
+        val_dataset: Validation dataset for this fold
+        test_dataset: Test dataset
+        args: Command line arguments
+        output_dir: Output directory
+        accelerator: Accelerator instance
+        
+    Returns:
+        val_acc: Validation accuracy for this fold
+        test_acc: Test accuracy for this fold
+    """
+    fold_dir = output_dir / f"fold_{fold_idx}"
+    if accelerator.is_local_main_process:
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(fold_dir / "logs"))
+    else:
+        writer = None
+    
+    if accelerator.is_local_main_process:
+        print(f"\n---- Training Fold {fold_idx} ----")
+    
+    # Create dataloaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        drop_last=True,
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+    )
+    
+    # Create model
+    num_classes = len(train_dataset.classes)
+    model_kwargs = {"num_classes": num_classes}
+    
+    if args.backbone in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
+        model_kwargs["pretrained"] = args.pretrained
+        model_kwargs["pool_type"] = args.pool_type
+    elif args.backbone in ["r3d_18", "r2plus1d_18"]:
+        model_kwargs["pretrained"] = args.pretrained
+        model_kwargs["dropout_prob"] = 0.5
+    
+    model = get_video_classifier(
+        num_classes=model_kwargs.pop("num_classes"),
+        backbone=args.backbone,
+        **model_kwargs,
+    )
+    
+    criterion = nn.CrossEntropyLoss(
+        weight=train_dataset.class_weights.to(accelerator.device)
+    )
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    
+    # Prepare for distributed training
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
+    )
+    test_loader = accelerator.prepare(test_loader)
+    
+    best_val_acc = 0.0
+    
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, accelerator, epoch
+        )
+        
+        val_loss, val_acc = validate(model, val_loader, criterion, accelerator)
+        
+        # Update learning rate
+        scheduler.step()
+        
+        # Log metrics
+        if accelerator.is_local_main_process and writer is not None:
+            writer.add_scalar(f"Fold_{fold_idx}/Loss/train", train_loss, epoch)
+            writer.add_scalar(f"Fold_{fold_idx}/Accuracy/train", train_acc, epoch)
+            writer.add_scalar(f"Fold_{fold_idx}/Loss/val", val_loss, epoch)
+            writer.add_scalar(f"Fold_{fold_idx}/Accuracy/val", val_acc, epoch)
+            writer.add_scalar(f"Fold_{fold_idx}/LearningRate", optimizer.param_groups[0]["lr"], epoch)
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            
+            if accelerator.is_local_main_process:
+                # Unwrap model before saving
+                unwrapped_model = accelerator.unwrap_model(model)
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": unwrapped_model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_acc": val_acc,
+                        "classes": train_dataset.classes,
+                    },
+                    fold_dir / "best_model.pth",
+                )
+    
+    # Test the model using the best weights
+    accelerator.wait_for_everyone()
+    
+    checkpoint = torch.load(
+        fold_dir / "best_model.pth", map_location=accelerator.device
+    )
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.load_state_dict(checkpoint["model_state_dict"])
+    
+    test_acc, all_preds, all_targets = test(model, test_loader, accelerator)
+    
+    if accelerator.is_local_main_process:
+        if writer is not None:
+            writer.add_scalar(f"Fold_{fold_idx}/Accuracy/test", test_acc, 0)
+            writer.close()
+            
+        np.savez(
+            fold_dir / "test_results.npz",
+            predictions=all_preds,
+            targets=all_targets,
+            accuracy=test_acc,
+        )
+        
+        classes = train_dataset.classes
+        metrics = calculate_and_plot_metrics(all_preds, all_targets, classes, fold_dir)
+        print(f"Fold {fold_idx} metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}")
+        
+    return best_val_acc, test_acc
+
+
+def run_cross_validation(args, output_dir, accelerator):
+    """
+    Run k-fold cross-validation
+    
+    Args:
+        args: Command line arguments
+        output_dir: Output directory
+        accelerator: Accelerator instance
+    """
+    # Load dataset metadata
+    df = pd.read_csv(args.csv_path)
+    
+    # Combine train and validation data for cross-validation
+    train_val_df = df[df["Split"].isin(["TRAIN", "VAL"])].reset_index(drop=True)
+    
+    # Set up k-fold cross validation
+    kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=args.seed)
+    
+    # Get test dataset
+    from echo.classification.data import get_video_transforms
+    
+    test_transform = get_video_transforms("test")
+    test_dataset = VideoDataset(
+        csv_path=args.csv_path,
+        data_dir=args.data_dir,
+        split="TEST",
+        transform=test_transform,
+        frames_per_clip=args.frames_per_clip,
+        frame_sampling=args.frame_sampling,
+        sampling_rate=args.sampling_rate,
+        synthetic_csv_path=args.synthetic_csv_path,
+        synthetic_data_dir=args.synthetic_data_dir,
+        use_synthetic_for_split=args.use_synthetic_for,
+        selected_classes=args.selected_classes,
+    )
+    
+    # Setup for storing results
+    fold_val_results = []
+    fold_test_results = []
+    
+    # Run k-fold cross validation
+    for fold_idx, (train_idx, val_idx) in enumerate(kf.split(train_val_df)):
+        # Create train and validation splits for this fold
+        fold_train_df = train_val_df.iloc[train_idx].copy()
+        fold_val_df = train_val_df.iloc[val_idx].copy()
+        
+        # Set appropriate split values
+        fold_train_df["Split"] = "TRAIN"
+        fold_val_df["Split"] = "VAL"
+        
+        # Save fold datasets temporarily
+        fold_csv_path = output_dir / f"fold_{fold_idx}_split.csv"
+        combined_df = pd.concat([fold_train_df, fold_val_df, df[df["Split"] == "TEST"]])
+        combined_df.to_csv(fold_csv_path, index=False)
+        
+        # Create datasets for this fold
+        train_transform = get_video_transforms("train")
+        val_transform = get_video_transforms("val")
+        
+        train_dataset = VideoDataset(
+            csv_path=fold_csv_path,
+            data_dir=args.data_dir,
+            split="TRAIN",
+            transform=train_transform,
+            frames_per_clip=args.frames_per_clip,
+            frame_sampling=args.frame_sampling,
+            sampling_rate=args.sampling_rate,
+            synthetic_csv_path=args.synthetic_csv_path,
+            synthetic_data_dir=args.synthetic_data_dir,
+            use_synthetic_for_split=args.use_synthetic_for,
+            selected_classes=args.selected_classes,
+        )
+        
+        val_dataset = VideoDataset(
+            csv_path=fold_csv_path,
+            data_dir=args.data_dir,
+            split="VAL",
+            transform=val_transform,
+            frames_per_clip=args.frames_per_clip,
+            frame_sampling=args.frame_sampling,
+            sampling_rate=args.sampling_rate,
+            synthetic_csv_path=args.synthetic_csv_path,
+            synthetic_data_dir=args.synthetic_data_dir,
+            use_synthetic_for_split=args.use_synthetic_for,
+            selected_classes=args.selected_classes,
+        )
+        
+        # Train and evaluate this fold
+        val_acc, test_acc = train_and_evaluate_cv_fold(
+            fold_idx, train_dataset, val_dataset, test_dataset, args, output_dir, accelerator
+        )
+        
+        fold_val_results.append(val_acc)
+        fold_test_results.append(test_acc)
+        
+        # Clean up temporary CSV
+        if accelerator.is_local_main_process:
+            fold_csv_path.unlink()
+    
+    # Summarize cross-validation results
+    if accelerator.is_local_main_process:
+        print("\n---- Cross-Validation Results ----")
+        for fold_idx in range(args.num_folds):
+            print(f"Fold {fold_idx}: Val accuracy = {fold_val_results[fold_idx]:.2f}%, Test accuracy = {fold_test_results[fold_idx]:.2f}%")
+        
+        print(f"\nMean validation accuracy: {np.mean(fold_val_results):.2f}% ± {np.std(fold_val_results):.2f}%")
+        print(f"Mean test accuracy: {np.mean(fold_test_results):.2f}% ± {np.std(fold_test_results):.2f}%")
+        
+        # Save cross-validation summary
+        cv_results = {
+            "fold_val_accuracies": fold_val_results,
+            "fold_test_accuracies": fold_test_results,
+            "mean_val_accuracy": float(np.mean(fold_val_results)),
+            "std_val_accuracy": float(np.std(fold_val_results)),
+            "mean_test_accuracy": float(np.mean(fold_test_results)),
+            "std_test_accuracy": float(np.std(fold_test_results)),
+        }
+        
+        with open(output_dir / "cv_results.json", "w") as f:
+            json.dump(cv_results, f, indent=4)
+
+
 def main():
     args = parse_args()
 
@@ -431,7 +719,10 @@ def main():
         with open(output_dir / "args.json", "w") as f:
             json.dump(vars(args), f, indent=4)
         # Set up tensorboard
-        writer = SummaryWriter(log_dir=str(output_dir / "logs"))
+        if not args.use_cross_val:
+            writer = SummaryWriter(log_dir=str(output_dir / "logs"))
+        else:
+            writer = None
     else:
         writer = None
 
@@ -440,7 +731,17 @@ def main():
         print(f"Using device: {accelerator.device}")
         print(f"Num processes: {accelerator.num_processes}")
         print(f"Distributed type: {accelerator.distributed_type}")
+        print(f"Using cross-validation: {args.use_cross_val}")
+        if args.use_cross_val:
+            print(f"Number of folds: {args.num_folds}")
 
+    # Execute cross-validation if enabled
+    if args.use_cross_val:
+        import pandas as pd
+        run_cross_validation(args, output_dir, accelerator)
+        return
+
+    # Otherwise, proceed with standard training using fixed train/val/test sets
     # Set up dataloaders
     if accelerator.is_local_main_process:
         print("Creating dataloaders...")
@@ -500,11 +801,7 @@ def main():
     criterion = nn.CrossEntropyLoss(
         weight=dataloaders["train"].dataset.class_weights.to(accelerator.device)
     )
-    # optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
-    # optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # Prepare for distributed training with accelerate
