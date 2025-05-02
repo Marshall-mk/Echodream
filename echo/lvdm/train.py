@@ -62,7 +62,8 @@ logger = get_logger(__name__, log_level="INFO")
 python train.py --config path/to/config.yaml --training_mode diffusion --conditioning_type class_id
 CUDA_VISIBLE_DEVICES='2,4,5,8' accelerate launch  --num_processes 4  --multi_gpu   
 --mixed_precision fp16 -m  echo.lvdm.train  --config echo/lvdm/configs/cardiacnet.yaml 
---training_mode diffusion --conditioning_type class_id
+--training_mode diffusion --conditioning_type class_id --condition_guidance_scale 5.0 --frame_guidance_scale 1.0
+--use_separate_guidance
 """
 
 

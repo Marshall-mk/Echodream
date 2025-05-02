@@ -12,6 +12,7 @@ from tqdm import tqdm
 from packaging import version
 from functools import partial
 from PIL import Image
+import pandas as pd
 
 import torch
 import torch.nn as nn
@@ -33,7 +34,7 @@ from echo.common import padf, unpadf, load_model, FlowMatchingScheduler
 """
 CUDA_VISIBLE_DEVICES='2' python -m echo.lidm.sample  
 	--config echo/lidm/configs/cardiacnet.yaml   
-	--unet /nfs/usrhome/khmuhammad/Echodream/experiments/lidm_cardiacnet/checkpoint-100000/unet_ema   
+	--unet /nfs/usrhome/khmuhammad/Echodream/experiments/lidm_cardiacnet/checkpoint-4800/unet_ema   
 	--vae /nfs/usrhome/khmuhammad/Echodream/models/vae   
 	--output /nfs/usrhome/khmuhammad/Echodream/samples/lidm_cardiacnet  
 	--num_samples 2000    
@@ -47,6 +48,8 @@ CUDA_VISIBLE_DEVICES='2' python -m echo.lidm.sample
     --seed 0
 
 """
+
+
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
     tokenized_text = tokenizer(
@@ -244,7 +247,7 @@ if __name__ == "__main__":
     # 2 - Load models
     unet = load_model(args.unet)
     vae = load_model(args.vae)
-    
+
     # Load text encoder and tokenizer if using text conditioning
     text_encoder = None
     tokenizer = None
@@ -318,8 +321,9 @@ if __name__ == "__main__":
         conditioning_value = args.view_ids
     else:
         conditioning_value = None  # For text, we'll handle differently
-        
+
     sample_index = 0
+    filelist = []
 
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(os.path.join(args.output, "images"), exist_ok=True)
@@ -370,7 +374,7 @@ if __name__ == "__main__":
                     latent_model_input, padding = format_input(
                         latent_model_input, mult=3
                     )
-                    if use_condition_guidance  and args.sampling_mode == "diffusion":
+                    if use_condition_guidance and args.sampling_mode == "diffusion":
                         # Classifier-free guidance
                         # Conditional prediction
                         forward_kwargs["encoder_hidden_states"] = conditioning
@@ -378,7 +382,7 @@ if __name__ == "__main__":
                             latent_model_input, **forward_kwargs
                         ).sample
                         noise_pred_cond = format_output(noise_pred_cond, pad=padding)
-                        
+
                         # Unconditional prediction
                         forward_kwargs["encoder_hidden_states"] = torch.zeros_like(
                             conditioning
@@ -386,12 +390,14 @@ if __name__ == "__main__":
                         noise_pred_uncond = unet(
                             latent_model_input, **forward_kwargs
                         ).sample
-                        noise_pred_uncond = format_output(noise_pred_uncond, pad=padding)
-                        
+                        noise_pred_uncond = format_output(
+                            noise_pred_uncond, pad=padding
+                        )
+
                         noise_pred = (
-                            noise_pred_uncond + args.condition_guidance_scale * (
-                                noise_pred_cond - noise_pred_uncond
-                            )
+                            noise_pred_uncond
+                            + args.condition_guidance_scale
+                            * (noise_pred_cond - noise_pred_uncond)
                         )
                     else:
                         # No classifier-free guidance
@@ -413,10 +419,25 @@ if __name__ == "__main__":
 
             images = images.clamp(0, 255).to(torch.uint8).cpu()
             images = rearrange(images, "b c h w -> b h w c")
+            # Get conditioning values for metadata
+            if args.conditioning_type == "class_id":
+                cond_values = conditioning.squeeze().to(torch.int).tolist()
+            elif args.conditioning_type == "view":
+                cond_values = conditioning.squeeze().to(torch.int).tolist()
+            else:  # text
+                cond_values = text_conditioning
 
             # 7 - Save samples
             images = images.numpy()
             for j in range(B):
+                # Save metadata
+                filelist.append(
+                    [
+                        f"sample_{sample_index:06d}",
+                        args.conditioning_type,
+                        cond_values[j],
+                    ]
+                )
                 Image.fromarray(images[j]).save(
                     os.path.join(
                         args.output, "images", f"sample_{sample_index:06d}.jpg"
@@ -434,5 +455,22 @@ if __name__ == "__main__":
                 if sample_index >= args.num_samples:
                     finished = True
                     break
+    # Save metadata
+    df = pd.DataFrame(
+        filelist,
+        columns=["FileName", "CondType", "CondValue"],
+    )
+    df.to_csv(os.path.join(args.output, "FileList.csv"), index=False)
 
+    # Save generation parameters
+    params = {
+        "sampling_mode": args.sampling_mode,
+        "conditioning_type": args.conditioning_type,
+        "num_samples": args.num_samples,
+        "num_steps": args.num_steps,
+        "condition_guidance_scale": args.condition_guidance_scale,
+        "seed": args.seed,
+    }
+    with open(os.path.join(args.output, "generation_params.json"), "w") as f:
+        json.dump(params, f, indent=2)
     print(f"Finished generating {sample_index} samples.")

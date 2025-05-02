@@ -30,7 +30,7 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from echo.common.datasets import TensorSet, ImageSet, TensorSetv3
+from echo.common.datasets import TensorSet, ImageSet, TensorSetv3, TensorSetv4
 from echo.common import (
     pad_reshape,
     unpad_reshape,
@@ -242,7 +242,7 @@ if __name__ == "__main__":
         "--conditioning_type",
         type=str,
         default="class_id",
-        choices=["class_id", "lvef", "view", "text"],
+        choices=["class_id", "lvef", "view", "text", "csv"],
         help="Type of conditioning to use.",
     )
 
@@ -363,7 +363,8 @@ if __name__ == "__main__":
         f"Conditioning files must be either .pt, .jpg or .png, not {file_ext}"
     )
     if file_ext == "pt":
-        dataset = TensorSetv3(args.conditioning, num_frames=1, split=["TEST"])
+        # dataset = TensorSetv3(args.conditioning, num_frames=1, split=["TEST"])
+        dataset = TensorSetv4(args.conditioning)
     else:
         dataset = ImageSet(args.conditioning, ext=file_ext)
     assert len(dataset) > 0, (
@@ -444,7 +445,7 @@ if __name__ == "__main__":
     elif args.conditioning_type == "view":
         conditioning_value = args.view_ids
     else:
-        conditioning_value = None  # For text, we'll handle differently
+        conditioning_value = None  # For text, and csv we'll handle differently
 
     if config.unet._class_name == "UNetSpatioTemporalConditionModel":
         dummy_added_time_ids = torch.zeros(
@@ -465,7 +466,7 @@ if __name__ == "__main__":
     # 6 - Generate samples
     with torch.no_grad():
         while not finished:
-            for cond in dataloader:
+            for cond, value in dataloader:
                 if finished:
                     break
 
@@ -485,6 +486,10 @@ if __name__ == "__main__":
                         tokenizer,
                         text_encoder,
                     )
+                elif args.conditioning_type == "csv":
+                    print("Loading conditioning from CSV")
+                    conditioning = value[:, None, None]
+                    conditioning = conditioning.to(device, dtype=dtype)
                 else:
                     conditioning = get_conditioning_vector(
                         args.conditioning_type,
