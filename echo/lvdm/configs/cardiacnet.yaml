@@ -140,7 +140,7 @@ report_to: wandb
 checkpointing_steps: 1000 # ~3/hour
 checkpoints_total_limit: 20 # no limit
 resume_from_checkpoint: latest
-tracker_project_name: echo-dream-cardiacnet
+tracker_project_name: echo-dream
 
 seed: 42
 

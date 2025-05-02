@@ -46,29 +46,24 @@ from echo.common import (
 )
 
 """
-python echo/arlvdm/sample_flexible.py \
-    --config echo/arlvdm/configs/default.yaml \
-    --unet experiments/lvdm/checkpoint-300000/unet_ema \
-    --vae models/vae \
-    --conditioning samples/data/reference_frames \
-    --output samples/output/samples \
-    --num_samples 400 \
-    --batch_size 8 \
-    --num_steps 256 \
-    --conditioning_type class_id \
-    --class_ids 3 \
-    --sampling_mode diffusion \
-    --save_as mp4,jpg \
-    --frames 192
-    
-# For class ID conditioning with diffusion sampling
-python echo/arlvdm/sample.py --config configs/default.yaml --unet models/unet --vae models/vae --conditioning data/references --output output/samples --sampling_mode diffusion --conditioning_type class_id --class_ids 3 --save_as avi
-
-# For LVEF conditioning with flow matching sampling
-python echo/arlvdm/sample.py --config configs/default.yaml --unet models/unet --vae models/vae --conditioning data/references --output output/samples --sampling_mode flow_matching --conditioning_type lvef --lvef_range 20 80 --save_as mp4
-
-# For view conditioning with diffusion and guidance
-python echo/arlvdm/sample.py --config configs/default.yaml --unet models/unet --vae models/vae --conditioning data/references --output output/samples --sampling_mode diffusion --conditioning_type view --view_ids 4 --guidance_scale 3.0 --save_as gif
+CUDA_VISIBLE_DEVICES='2' python -m echo.lvdm.sample  
+	--config echo/lvdm/configs/cardiacnet.yaml   
+	--unet /nfs/usrhome/khmuhammad/Echodream/experiments/lvdm_cardiacnet/checkpoint-100000/unet_ema   
+	--vae /nfs/usrhome/khmuhammad/Echodream/models/vae   
+	--conditioning /nfs/usrhome/khmuhammad/Echodream/data/latents/cardiacnet/Latents   
+	--output /nfs/usrhome/khmuhammad/Echodream/samples/lvdm_cardiacnet  
+	--num_samples 655    
+	--batch_size 48    
+	--num_steps 256     
+	--save_as mp4,jpg    
+	--frames 192 
+	--sampling_mode diffusion 
+	--conditioning_type class_id 
+	--class_ids 4
+    --condition_guidance_scale 5.0
+    --frame_guidance_scale 1.0
+    --use_separate_guidance
+    --seed 42
 """
 
 
@@ -287,10 +282,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument(
-        "--guidance_scale",
+        "--condition_guidance_scale",
+        type=float,
+        default=5.0,
+        help="Guidance scale for class conditioning (1.0=no guidance).",
+    )
+    parser.add_argument(
+        "--frame_guidance_scale",
         type=float,
         default=1.0,
-        help="Classifier-free guidance scale (if > 1.0).",
+        help="Guidance scale for frame conditioning (1.0=no guidance).",
+    )
+    parser.add_argument(
+        "--use_separate_guidance",
+        action="store_true",
+        help="Use separate guidance scales for class and frame conditioning.",
     )
     parser.add_argument(
         "--ddim",
@@ -497,10 +503,6 @@ if __name__ == "__main__":
                     else conditioning
                 )
 
-                # print(
-                #     f"Conditioning shape: {conditioning.shape}, dtype: {conditioning.dtype}, range: [{conditioning.min()}, {conditioning.max()}]"
-                # )
-
                 # Set the correct keyword argument based on conditioning type
                 forward_kwargs["encoder_hidden_states"] = conditioning
 
@@ -522,7 +524,9 @@ if __name__ == "__main__":
                 )  # B x C x T x H x W
 
                 # Apply classifier-free guidance if specified
-                use_guidance = args.guidance_scale > 1.0
+                use_condition_guidance = args.condition_guidance_scale > 1.0
+                use_frame_guidance = args.frame_guidance_scale > 1.0
+                use_separate_guidance = args.use_separate_guidance
 
                 # Denoise the latent
                 with torch.autocast("cuda"):
@@ -533,74 +537,213 @@ if __name__ == "__main__":
                         latent_model_input = scheduler.scale_model_input(
                             latents, timestep=t
                         )
+
+                        # Split latent into noise part and conditioning part for frame guidance
+                        latent_noise = latent_model_input
+                        latent_cond = latent_cond_images
                         latent_model_input = torch.cat(
-                            (latent_model_input, latent_cond_images), dim=1
+                            (latent_noise, latent_cond), dim=1
                         )  # B x 2C x T x H x W
 
-                        # Duplicate input for classifier-free guidance if needed
-                        if use_guidance and args.sampling_mode == "diffusion":
-                            # Create unconditional input by removing conditioning
-                            uncond_kwargs = forward_kwargs.copy()
-                            if args.conditioning_type == "text":
-                                # Zero out text embeddings for unconditional
+                        # Format input for model
+                        latent_model_input, padding = format_input(
+                            latent_model_input, mult=3
+                        )
+
+                        if (
+                            use_condition_guidance or use_frame_guidance
+                        ) and args.sampling_mode == "diffusion":
+                            # Create input combinations based on guidance settings
+                            if (
+                                use_separate_guidance
+                                and use_condition_guidance
+                                and use_frame_guidance
+                            ):
+                                # Four combinations: (class+frame, class-only, frame-only, none)
+
+                                # 1. Fully conditional (class+frame)
+                                full_cond_kwargs = forward_kwargs.copy()
+
+                                # 2. Class-only (zero frame conditioning)
+                                class_only_kwargs = forward_kwargs.copy()
+                                class_only_input = latent_model_input.clone()
+                                # Zero out frame conditioning part (second half of channels)
+                                class_only_input[:, C:, :, :, :] = torch.zeros_like(
+                                    class_only_input[:, C:, :, :, :]
+                                )
+
+                                # 3. Frame-only (zero class conditioning)
+                                frame_only_kwargs = forward_kwargs.copy()
+                                frame_only_kwargs["encoder_hidden_states"] = (
+                                    torch.zeros_like(conditioning)
+                                )
+
+                                # 4. Unconditional (no class, no frame)
+                                uncond_kwargs = forward_kwargs.copy()
                                 uncond_kwargs["encoder_hidden_states"] = (
                                     torch.zeros_like(conditioning)
                                 )
+                                uncond_input = latent_model_input.clone()
+                                uncond_input[:, C:, :, :, :] = torch.zeros_like(
+                                    uncond_input[:, C:, :, :, :]
+                                )
+
+                                # Process each combination for stitching
+                                inputs_list = []
+                                for r in range(TR):
+                                    inputs_list.append(
+                                        latent_model_input[
+                                            :, r * (T - OT) : r * (T - OT) + T
+                                        ]
+                                    )
+                                inputs = torch.cat(inputs_list, dim=0)
+
+                                # Run predictions
+                                noise_pred_full = unet(
+                                    inputs, **full_cond_kwargs
+                                ).sample
+
+                                inputs_class_only_list = []
+                                for r in range(TR):
+                                    inputs_class_only_list.append(
+                                        class_only_input[
+                                            :, r * (T - OT) : r * (T - OT) + T
+                                        ]
+                                    )
+                                inputs_class_only = torch.cat(
+                                    inputs_class_only_list, dim=0
+                                )
+                                noise_pred_class = unet(
+                                    inputs_class_only, **full_cond_kwargs
+                                ).sample
+
+                                noise_pred_frame = unet(
+                                    inputs, **frame_only_kwargs
+                                ).sample
+
+                                inputs_uncond_list = []
+                                for r in range(TR):
+                                    inputs_uncond_list.append(
+                                        uncond_input[:, r * (T - OT) : r * (T - OT) + T]
+                                    )
+                                inputs_uncond = torch.cat(inputs_uncond_list, dim=0)
+                                noise_pred_uncond = unet(
+                                    inputs_uncond, **uncond_kwargs
+                                ).sample
+
+                                # Split and stitch predictions
+                                outputs_full = torch.chunk(noise_pred_full, TR, dim=0)
+                                outputs_class = torch.chunk(noise_pred_class, TR, dim=0)
+                                outputs_frame = torch.chunk(noise_pred_frame, TR, dim=0)
+                                outputs_uncond = torch.chunk(
+                                    noise_pred_uncond, TR, dim=0
+                                )
+
+                                # Apply separate guidance scales
+                                noise_predictions = []
+                                for r in range(TR):
+                                    full_chunk = (
+                                        outputs_full[r]
+                                        if r == 0
+                                        else outputs_full[r][:, OT:]
+                                    )
+                                    class_chunk = (
+                                        outputs_class[r]
+                                        if r == 0
+                                        else outputs_class[r][:, OT:]
+                                    )
+                                    frame_chunk = (
+                                        outputs_frame[r]
+                                        if r == 0
+                                        else outputs_frame[r][:, OT:]
+                                    )
+                                    uncond_chunk = (
+                                        outputs_uncond[r]
+                                        if r == 0
+                                        else outputs_uncond[r][:, OT:]
+                                    )
+
+                                    # Combined guidance: uncond + class_guidance*(class-uncond) + frame_guidance*(frame-uncond)
+                                    guided_chunk = (
+                                        uncond_chunk
+                                        + args.condition_guidance_scale
+                                        * (class_chunk - uncond_chunk)
+                                        + args.frame_guidance_scale
+                                        * (frame_chunk - uncond_chunk)
+                                    )
+                                    noise_predictions.append(guided_chunk)
+
                             else:
-                                # Zero out class/lvef/view for unconditional
-                                uncond_kwargs[f"{args.conditioning_type}"] = (
+                                # Simplified guidance with single scale
+                                # Create unconditional input
+                                uncond_kwargs = forward_kwargs.copy()
+                                uncond_kwargs["encoder_hidden_states"] = (
                                     torch.zeros_like(conditioning)
                                 )
 
-                            # Prepare for format_input
-                            latent_model_input, padding = format_input(
-                                latent_model_input, mult=3
-                            )
+                                # Create unconditional input for frame guidance if needed
+                                if use_frame_guidance:
+                                    uncond_input = latent_model_input.clone()
+                                    uncond_input[:, C:, :, :, :] = torch.zeros_like(
+                                        uncond_input[:, C:, :, :, :]
+                                    )
+                                else:
+                                    uncond_input = latent_model_input
 
-                            # Stitching for conditional prediction
-                            inputs = torch.cat(
-                                [
-                                    latent_model_input[
-                                        :, r * (T - OT) : r * (T - OT) + T
-                                    ]
-                                    for r in range(TR)
-                                ],
-                                dim=0,
-                            )
-                            noise_pred_cond = unet(inputs, **forward_kwargs).sample
+                                # Stitching for conditional prediction
+                                inputs_cond_list = []
+                                for r in range(TR):
+                                    inputs_cond_list.append(
+                                        latent_model_input[
+                                            :, r * (T - OT) : r * (T - OT) + T
+                                        ]
+                                    )
+                                inputs_cond = torch.cat(inputs_cond_list, dim=0)
+                                noise_pred_cond = unet(
+                                    inputs_cond, **forward_kwargs
+                                ).sample
 
-                            # Stitching for unconditional prediction
-                            noise_pred_uncond = unet(inputs, **uncond_kwargs).sample
+                                # Stitching for unconditional prediction
+                                inputs_uncond_list = []
+                                for r in range(TR):
+                                    inputs_uncond_list.append(
+                                        uncond_input[:, r * (T - OT) : r * (T - OT) + T]
+                                    )
+                                inputs_uncond = torch.cat(inputs_uncond_list, dim=0)
+                                noise_pred_uncond = unet(
+                                    inputs_uncond, **uncond_kwargs
+                                ).sample
 
-                            # Apply classifier-free guidance
-                            outputs_cond = torch.chunk(noise_pred_cond, TR, dim=0)
-                            outputs_uncond = torch.chunk(noise_pred_uncond, TR, dim=0)
-
-                            # Combine predictions with guidance
-                            noise_predictions = []
-                            for r in range(TR):
-                                cond_chunk = (
-                                    outputs_cond[r]
-                                    if r == 0
-                                    else outputs_cond[r][:, OT:]
+                                # Apply guidance
+                                outputs_cond = torch.chunk(noise_pred_cond, TR, dim=0)
+                                outputs_uncond = torch.chunk(
+                                    noise_pred_uncond, TR, dim=0
                                 )
-                                uncond_chunk = (
-                                    outputs_uncond[r]
-                                    if r == 0
-                                    else outputs_uncond[r][:, OT:]
-                                )
-                                guided_chunk = uncond_chunk + args.guidance_scale * (
-                                    cond_chunk - uncond_chunk
-                                )
-                                noise_predictions.append(guided_chunk)
 
-                            noise_pred = torch.cat(noise_predictions, dim=1)
+                                guidance_scale = (
+                                    args.condition_guidance_scale
+                                    if use_condition_guidance
+                                    else args.frame_guidance_scale
+                                )
+
+                                noise_predictions = []
+                                for r in range(TR):
+                                    cond_chunk = (
+                                        outputs_cond[r]
+                                        if r == 0
+                                        else outputs_cond[r][:, OT:]
+                                    )
+                                    uncond_chunk = (
+                                        outputs_uncond[r]
+                                        if r == 0
+                                        else outputs_uncond[r][:, OT:]
+                                    )
+                                    guided_chunk = uncond_chunk + guidance_scale * (
+                                        cond_chunk - uncond_chunk
+                                    )
+                                    noise_predictions.append(guided_chunk)
                         else:
                             # Standard prediction without guidance
-                            latent_model_input, padding = format_input(
-                                latent_model_input, mult=3
-                            )
-
                             # Stitching
                             inputs = torch.cat(
                                 [
@@ -619,8 +762,9 @@ if __name__ == "__main__":
                                 noise_predictions.append(
                                     outputs[r] if r == 0 else outputs[r][:, OT:]
                                 )
-                            noise_pred = torch.cat(noise_predictions, dim=1)
 
+                        # Combine noise predictions and format output
+                        noise_pred = torch.cat(noise_predictions, dim=1)
                         noise_pred = format_output(noise_pred, pad=padding)
 
                         # Update latents based on sampling mode
@@ -751,7 +895,9 @@ if __name__ == "__main__":
         "conditioning_type": args.conditioning_type,
         "num_samples": args.num_samples,
         "num_steps": args.num_steps,
-        "guidance_scale": args.guidance_scale,
+        "condition_guidance_scale": args.condition_guidance_scale,
+        "frame_guidance_scale": args.frame_guidance_scale,
+        "use_separate_guidance": args.use_separate_guidance,
         "seed": args.seed,
         "frames": args.frames,
     }

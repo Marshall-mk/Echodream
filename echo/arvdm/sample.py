@@ -71,6 +71,7 @@ python echo/arlvdm/sample_flexible.py --config configs/default.yaml --unet model
 python echo/arlvdm/sample_flexible.py --config configs/default.yaml --unet models/unet --vae models/vae --conditioning data/references --output output/samples --sampling_mode diffusion --conditioning_type view --view_ids 4 --guidance_scale 3.0 --save_as gif
 """
 
+
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
     tokenized_text = tokenizer(
@@ -82,7 +83,10 @@ def tokenize_text(text, tokenizer):
     )
     return tokenized_text.input_ids, tokenized_text.attention_mask
 
-def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder):
+
+def get_conditioning_vector(
+    conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder
+):
     """
     Create conditioning vectors based on the specified type
     """
@@ -142,7 +146,7 @@ def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dt
     elif conditioning_type == "text":
         text_templates = [
             "An echocardiography video with {} condition",
-            "An echocardiography video with Left Ventricular Ejection Fraction {}%"
+            "An echocardiography video with Left Ventricular Ejection Fraction {}%",
         ]
         class_names = [
             "Atrial Septal Defect",
@@ -150,19 +154,19 @@ def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dt
             "Non-Pulmonary Arterial Hypertension",
             "Pulmonary Arterial Hypertension",
         ]
-        
+
         # Generate random text conditioning
         text_conditioning = []
         for _ in range(B // 2):
             # Randomly combine text_templates[0] with class names
             random_class = class_names[torch.randint(0, len(class_names), (1,)).item()]
             text_conditioning.append(text_templates[0].format(random_class))
-        
+
         for _ in range(B // 2):
             # Randomly combine text_templates[1] with a random LVEF value
             random_lvef = torch.randint(10, 90, (1,)).item()
             text_conditioning.append(text_templates[1].format(random_lvef))
-        
+
         # Tokenize the text conditioning
         input_ids, attention_mask = tokenize_text(text_conditioning, tokenizer)
         input_ids = input_ids.to(device)
@@ -170,26 +174,27 @@ def get_conditioning_vector(conditioning_type, conditioning_value, B, device, dt
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state.to(dtype=dtype)
-        
+
         return conditioning, text_conditioning
-    
+
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
+
 
 def load_text_encoder_and_tokenizer(text_encoder_path, tokenizer_path=None):
     """
     Loads the text encoder and tokenizer for text-conditioned generation.
-    
+
     Args:
         text_encoder_path: Path to the text encoder model or pretrained model name
         tokenizer_path: Path to the tokenizer. If None, will use text_encoder_path
-    
+
     Returns:
         tuple: (text_encoder, tokenizer) - Loaded models for inference
     """
     if tokenizer_path is None:
         tokenizer_path = text_encoder_path
-    
+
     # Check if the paths are local directories or HF model IDs
     if os.path.isdir(text_encoder_path):
         # Load from local directory
@@ -197,18 +202,19 @@ def load_text_encoder_and_tokenizer(text_encoder_path, tokenizer_path=None):
     else:
         # Load from Hugging Face
         text_encoder = CLIPTextModel.from_pretrained(text_encoder_path)
-    
+
     if os.path.isdir(tokenizer_path):
         # Load from local directory
         tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
     else:
         # Load from Hugging Face
         tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
-    
+
     print(f"Loaded text encoder from {text_encoder_path}")
     print(f"Loaded tokenizer from {tokenizer_path}")
-    
+
     return text_encoder, tokenizer
+
 
 if __name__ == "__main__":
     # 1 - Parse command line arguments
@@ -279,8 +285,18 @@ if __name__ == "__main__":
         default=192,
         help="Number of frames to generate. Must be a multiple of 32",
     )
-    parser.add_argument("--prior_frames", type=int, default=64, help="Number of prior frames to use for conditioning.")
-    parser.add_argument("--stride", type=int, default=32, help="Number of frames to generate in each step. Use 1 for fully autoregressive.")
+    parser.add_argument(
+        "--prior_frames",
+        type=int,
+        default=64,
+        help="Number of prior frames to use for conditioning.",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=32,
+        help="Number of frames to generate in each step. Use 1 for fully autoregressive.",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument(
         "--guidance_scale",
@@ -294,14 +310,18 @@ if __name__ == "__main__":
         help="Use DDIM sampler (only for diffusion mode).",
     )
     parser.add_argument(
-        "--text_encoder", type=str, default=None, 
-        help="Path to text encoder model (required for text conditioning)."
+        "--text_encoder",
+        type=str,
+        default=None,
+        help="Path to text encoder model (required for text conditioning).",
     )
     parser.add_argument(
-        "--tokenizer", type=str, default=None,
-        help="Path to tokenizer (if different from text encoder path)."
+        "--tokenizer",
+        type=str,
+        default=None,
+        help="Path to tokenizer (if different from text encoder path).",
     )
-    
+
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config)
@@ -318,7 +338,7 @@ if __name__ == "__main__":
         text_encoder, tokenizer = load_text_encoder_and_tokenizer(
             args.text_encoder, args.tokenizer
         )
-        
+
     # 3 - Load or create scheduler based on sampling_mode
     if args.sampling_mode == "diffusion":
         scheduler_kwargs = OmegaConf.to_container(config.noise_scheduler)
@@ -381,7 +401,7 @@ if __name__ == "__main__":
         text_encoder = text_encoder.to(device)
         tokenizer = tokenizer.to(device)
         text_encoder.eval()
-        
+
     format_input = (
         pad_reshape
         if config.unet._class_name == "UNetSpatioTemporalConditionModel"
@@ -449,11 +469,23 @@ if __name__ == "__main__":
                 # Get conditioning based on specified type
                 if args.conditioning_type == "text":
                     conditioning, text_conditioning = get_conditioning_vector(
-                        args.conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder
+                        args.conditioning_type,
+                        conditioning_value,
+                        B,
+                        device,
+                        dtype,
+                        tokenizer,
+                        text_encoder,
                     )
                 else:
                     conditioning = get_conditioning_vector(
-                        args.conditioning_type, conditioning_value, B, device, dtype, tokenizer, text_encoder
+                        args.conditioning_type,
+                        conditioning_value,
+                        B,
+                        device,
+                        dtype,
+                        tokenizer,
+                        text_encoder,
                     )
 
                 # Set the correct keyword argument based on conditioning type
@@ -477,7 +509,9 @@ if __name__ == "__main__":
                 #     1, 1, prior_frames, 1, 1
                 # )  # B x C x T x H x W
                 # Apply classifier-free guidance if specified
-                conditioning_frames = latent_cond_images.permute(0, 2, 1, 3, 4)  # B x C x T x H x W
+                conditioning_frames = latent_cond_images.permute(
+                    0, 2, 1, 3, 4
+                )  # B x C x T x H x W
                 use_guidance = args.guidance_scale > 1.0
                 # Generate frames autoregressively with the specified stride
                 for frame_idx in range(0, total_frames, stride):
@@ -570,7 +604,7 @@ if __name__ == "__main__":
                 elif args.conditioning_type == "view":
                     cond_values = conditioning.squeeze().to(torch.int).tolist()
                 else:  # text
-                    cond_values = text_conditioning # This will be a list of strings
+                    cond_values = text_conditioning  # This will be a list of strings
 
                 # save samples
                 for j in range(B):

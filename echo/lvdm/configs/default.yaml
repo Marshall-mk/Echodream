@@ -101,7 +101,7 @@ dataloader_num_workers: 16
 max_train_steps: 3000000
 training_conditioning_type: text
 
-learning_rate: 1e-4
+learning_rate: 1e-5
 lr_warmup_steps: 500
 scale_lr: false
 lr_scheduler: constant
@@ -133,12 +133,12 @@ validation_class_ids: [0, 1, 2, 2] # defines the number of samples
 validation_texts: ["0.0", "0.4", "0.7", "1.0"] # defines the number of samples
 num_validation_samples: 4 # defines the number of samples
 validation_guidance: 1.0
-validation_steps: 1500
+validation_steps: 5000
 validation_conditioning_type: text
 
 report_to: wandb
 checkpointing_steps: 10000 # ~3/hour
-checkpoints_total_limit: 20 # no limit
+checkpoints_total_limit: 100 # no limit
 resume_from_checkpoint: latest
 tracker_project_name: echo-dream
 

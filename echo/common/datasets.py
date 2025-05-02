@@ -1220,7 +1220,8 @@ class TensorSetv2(Dataset):
         self.root = root
         self.num_frames = num_frames
         self.all_tensors = [
-            path for path in glob(os.path.join(root, "*.pt"))
+            path
+            for path in glob(os.path.join(root, "*.pt"))
             if self._has_enough_frames(path)
         ]
 
@@ -1239,8 +1240,16 @@ class TensorSetv2(Dataset):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
         return tensor[: self.num_frames]
 
+
 class TensorSetv3(Dataset):
-    def __init__(self, root, num_frames=1, ext=".pt", split=["TRAIN", "VAL", "TEST"], csv_file="FileList.csv"):
+    def __init__(
+        self,
+        root,
+        num_frames=1,
+        ext=".pt",
+        split=["TRAIN", "VAL", "TEST"],
+        csv_file="FileList.csv",
+    ):
         self.root = root
         self.num_frames = num_frames
         self.split = split
@@ -1265,7 +1274,7 @@ class TensorSetv3(Dataset):
 
     def __getitem__(self, idx):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
-        return tensor[: self.num_frames] 
+        return tensor[: self.num_frames]
 
 
 class SimaseUSVideoDataset(Dataset):

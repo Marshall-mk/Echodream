@@ -18,12 +18,14 @@ df = pd.read_csv(args.input)
 df["class_id"] = df["CondValue"]
 
 # Add class_name column based on class_id
-df["class_name"] = df["class_id"].map({
-            0: "Atrial Septal Defect",
-            1: "Non-Atrial Septal Defect",
-            2: "Non-Pulmonary Arterial Hypertension",
-            3: "Pulmonary Arterial Hypertension",
-        })
+df["class_name"] = df["class_id"].map(
+    {
+        0: "Atrial Septal Defect",
+        1: "Non-Atrial Septal Defect",
+        2: "Non-Pulmonary Arterial Hypertension",
+        3: "Pulmonary Arterial Hypertension",
+    }
+)
 
 # Save the modified dataframe to a new CSV file
 df.to_csv(args.output, index=False)
