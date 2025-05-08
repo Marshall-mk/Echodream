@@ -168,4 +168,3 @@ experiments/
 wandb/
 samples/
 .vscode/
-echo/privacy

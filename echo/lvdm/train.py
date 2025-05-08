@@ -7,8 +7,8 @@ from einops import rearrange
 from omegaconf import OmegaConf
 import numpy as np
 from tqdm.auto import tqdm
-from packaging import version
 from skimage.metrics import structural_similarity
+from packaging import version
 from functools import partial
 from copy import deepcopy
 
@@ -60,10 +60,9 @@ logger = get_logger(__name__, log_level="INFO")
 
 """
 python train.py --config path/to/config.yaml --training_mode diffusion --conditioning_type class_id
-CUDA_VISIBLE_DEVICES='2,4,5,8' accelerate launch  --num_processes 4  --multi_gpu   
---mixed_precision fp16 -m  echo.lvdm.train  --config echo/lvdm/configs/cardiacnet.yaml 
---training_mode diffusion --conditioning_type class_id --condition_guidance_scale 5.0 --frame_guidance_scale 1.0
---use_separate_guidance
+CUDA_VISIBLE_DEVICES='0,1,5,6' accelerate launch  --num_processes 4  --multi_gpu   
+--mixed_precision fp16 -m  echo.lvdm.train  --config echo/lvdm/configs/default.yaml 
+--training_mode diffusion --conditioning_type text
 """
 
 
@@ -82,32 +81,31 @@ def tokenize_text(text, tokenizer):
 def compute_validation_metrics(generated_videos, reference_videos):
     """Compute validation metrics between generated and reference videos."""
     metrics = {}
-
+    
     # Calculate SSIM
     ssim_values = []
     for i in range(len(generated_videos)):
         ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
         ssim_values.append(ssim_val)
-    metrics["ssim"] = np.mean(ssim_values)
-
+    metrics['ssim'] = np.mean(ssim_values)
+    
     # Calculate PSNR
     psnr_values = []
     for i in range(len(generated_videos)):
         psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
         psnr_values.append(psnr_val)
-    metrics["psnr"] = np.mean(psnr_values)
-
+    metrics['psnr'] = np.mean(psnr_values)
+    
     # You could add other metrics like FID if you have a pretrained model
-
+    
     return metrics
-
 
 def calculate_ssim(generated_video, reference_video):
     """Calculate SSIM between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-
+    
     # Calculate SSIM for each frame
     ssim_values = []
     for i in range(generated_video.shape[0]):
@@ -115,16 +113,15 @@ def calculate_ssim(generated_video, reference_video):
             generated_video[i], reference_video[i], multichannel=True
         )
         ssim_values.append(ssim_val)
-
+    
     return np.mean(ssim_values)
-
 
 def calculate_psnr(generated_video, reference_video):
     """Calculate PSNR between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-
+    
     # Calculate PSNR for each frame
     psnr_values = []
     for i in range(generated_video.shape[0]):
@@ -134,7 +131,7 @@ def calculate_psnr(generated_video, reference_video):
         else:
             psnr_val = 20 * np.log10(255.0 / np.sqrt(mse))
             psnr_values.append(psnr_val)
-
+    
     return np.mean(psnr_values)
 
 
@@ -210,6 +207,7 @@ def log_validation(
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state.to(dtype=weight_dtype)
+
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
@@ -255,76 +253,31 @@ def log_validation(
             generator=generator,
         )
 
-        # Get guidance scales from config or use defaults
-        condition_guidance_scale = getattr(config, "condition_guidance_scale", 5.0)
-        frame_guidance_scale = getattr(config, "frame_guidance_scale", 1.0)
-        use_separate_guidance = getattr(config, "use_separate_guidance", False)
-
-        # Set up for condition guidance
-        if condition_guidance_scale > 1.0:
-            # For class guidance, create a no-class condition (either zeros or empty)
-            if conditioning_type == "text":
-                # For text, use empty text embeddings from the tokenizer
-                empty_text = [""] * len(ref_elements)
-                empty_ids, empty_mask = tokenize_text(empty_text, tokenizer)
-                empty_ids = empty_ids.to(accelerator.device)
-                empty_mask = empty_mask.to(accelerator.device)
-                uncond_class = text_encoder(
-                    input_ids=empty_ids, attention_mask=empty_mask
-                ).last_hidden_state.to(dtype=weight_dtype)
-            else:
-                # For other condition types, use zeros
-                uncond_class = torch.zeros_like(conditioning)
-
-            # Concatenate class conditions with unconditional ones
-            combined_class = torch.cat([uncond_class, conditioning])
-        else:
-            combined_class = conditioning
-
-        # Set up for frame guidance if using separate guidance
-        if use_separate_guidance and frame_guidance_scale > 1.0:
-            # For frame guidance, create a zero frame
-            uncond_frame = torch.zeros_like(ref_frames)
-            # Concatenate frame conditions
-            combined_frames = torch.cat([uncond_frame, ref_frames])
-            # Repeat if class guidance is also used
-            if condition_guidance_scale > 1.0:
-                combined_frames = torch.cat([combined_frames, combined_frames])
-        else:
-            combined_frames = ref_frames
-            # Repeat if class guidance is active
-            if condition_guidance_scale > 1.0:
-                combined_frames = torch.cat([combined_frames] * 2)
+        # Set up for guidance if needed
+        if hasattr(config, "validation_guidance") and config.validation_guidance > 1.0:
+            conditioning = torch.cat([conditioning] * 2)
+            ref_frames = torch.cat([ref_frames] * 2)
 
         # Sampling loop
         if config.training_mode == "diffusion":
             # Diffusion sampling loop
             for t in timesteps:
-                # Prepare batched latents based on guidance configuration
-                latent_model_input = latents
-
-                if condition_guidance_scale > 1.0:
-                    latent_model_input = torch.cat([latent_model_input] * 2)
-
+                latent_model_input = (
+                    torch.cat([latents] * 2)
+                    if hasattr(config, "validation_guidance")
+                    and config.validation_guidance > 1.0
+                    else latents
+                )
                 latent_model_input = scheduler.scale_model_input(
                     latent_model_input, timestep=t
                 )
-
-                # Combine with frames
-                latent_model_input = torch.cat(
-                    (latent_model_input, combined_frames), dim=1
-                )
+                latent_model_input = torch.cat((latent_model_input, ref_frames), dim=1)
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
-                # Forward pass
-                forward_kwargs = {
-                    "timestep": t,
-                    "encoder_hidden_states": combined_class,
-                }
+                forward_kwargs = {"timestep": t, "encoder_hidden_states": conditioning}
                 if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-                    batch_size = B * (2 if condition_guidance_scale > 1.0 else 1)
                     dummy_added_time_ids = torch.zeros(
-                        (batch_size, config.unet.addition_time_embed_dim),
+                        (B, config.unet.addition_time_embed_dim),
                         device=accelerator.device,
                         dtype=weight_dtype,
                     )
@@ -333,11 +286,12 @@ def log_validation(
                 noise_pred = unet(latent_model_input, **forward_kwargs).sample
                 noise_pred = format_output(noise_pred, pad=padding)
 
-                # Apply guidance
-                if condition_guidance_scale > 1.0:
-                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                    # Apply class guidance
-                    noise_pred = noise_pred_uncond + condition_guidance_scale * (
+                if (
+                    hasattr(config, "validation_guidance")
+                    and config.validation_guidance > 1.0
+                ):
+                    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + config.validation_guidance * (
                         noise_pred_cond - noise_pred_uncond
                     )
 
@@ -353,45 +307,23 @@ def log_validation(
             for i in range(len(t_steps) - 1):
                 t = t_steps[i]
                 t_tensor = t.repeat(B)
-
-                # Prepare batched latents based on guidance configuration
-                latent_model_input = latents
-
-                if condition_guidance_scale > 1.0:
-                    latent_model_input = torch.cat([latent_model_input] * 2)
-
-                # Combine with frames
-                latent_model_input = torch.cat(
-                    (latent_model_input, combined_frames), dim=1
-                )
+                latent_model_input = torch.cat((latents, ref_frames), dim=1)
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
-                # Forward pass
                 forward_kwargs = {
-                    "timestep": t_tensor
-                    if condition_guidance_scale <= 1.0
-                    else t_tensor.repeat(2),
-                    "encoder_hidden_states": combined_class,
+                    "timestep": t_tensor,
+                    "encoder_hidden_states": conditioning,
                 }
                 if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-                    batch_size = B * (2 if condition_guidance_scale > 1.0 else 1)
                     dummy_added_time_ids = torch.zeros(
-                        (batch_size, config.unet.addition_time_embed_dim),
+                        (B, config.unet.addition_time_embed_dim),
                         device=accelerator.device,
-                        dtype=weight_dtype,
+                        dtype=weight_dtype, 
                     )
                     forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
                 velocity_pred = unet(latent_model_input, **forward_kwargs).sample
                 velocity_pred = format_output(velocity_pred, pad=padding)
-
-                # Apply guidance
-                if condition_guidance_scale > 1.0:
-                    velocity_pred_uncond, velocity_pred_cond = velocity_pred.chunk(2)
-                    # Apply class guidance
-                    velocity_pred = velocity_pred_uncond + condition_guidance_scale * (
-                        velocity_pred_cond - velocity_pred_uncond
-                    )
 
                 # Euler step
                 latents = latents - velocity_pred * dt
@@ -438,6 +370,7 @@ def log_validation(
     # reshape for wandb
     videos = rearrange(videos, "b c t h w -> t c h (b w)")  # prepare for wandb
     videos = videos.numpy()
+
     logger.info("Done sampling... ")
     if config.validation_fps == "original":
         config.validation_fps = 50.0
@@ -747,21 +680,6 @@ def train(
         f"  U-Net: Total params = {model_num_params} \t Trainable params = {model_trainable_params} ({model_trainable_params / model_num_params * 100:.2f}%)"
     )
 
-    # Set default values for guidance scales if not provided
-    if not hasattr(config, "condition_guidance_scale"):
-        config.condition_guidance_scale = 5.0  # default strong class guidance
-
-    if not hasattr(config, "frame_guidance_scale"):
-        config.frame_guidance_scale = 1.0  # default weaker frame guidance
-
-    if not hasattr(config, "use_separate_guidance"):
-        config.use_separate_guidance = False  # by default use just class guidance
-
-    # Print guidance configuration
-    logger.info(f"Condition guidance scale: {config.condition_guidance_scale}")
-    logger.info(f"Frame guidance scale: {config.frame_guidance_scale}")
-    logger.info(f"Using separate guidance: {config.use_separate_guidance}")
-
     # Resume from checkpoint if needed
     global_step = 0
     first_epoch = 0
@@ -799,6 +717,9 @@ def train(
         disable=not accelerator.is_main_process,
     )
 
+    # Set unconditional probability
+    uncond_p = config.get("drop_conditioning", 0.3)
+
     # Training loop
     for epoch in range(first_epoch, config.num_train_epochs):
         train_loss = 0.0
@@ -828,14 +749,14 @@ def train(
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
 
-                    # Add a seed reset before processing text through CLIP to avoid
+                    # Add a seed reset before processing text through CLIP to avoid 
                     # potential RNG state corruption across processes
                     if torch.distributed.is_initialized():
                         # Manually reset seed to avoid mt19937 state corruption
                         torch.manual_seed(1000 + global_step)
                         if torch.cuda.is_available():
                             torch.cuda.manual_seed_all(1000 + global_step)
-
+                    
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
@@ -859,32 +780,20 @@ def train(
                 mask = (frame_indices <= padding_indices.unsqueeze(1)).float()
                 mask = mask.view(B, 1, T, 1, 1).expand(-1, C, -1, H, W)
 
-                # Apply conditioning dropout for classifier-free guidance training
-                # This is independent for class and frame to support separate guidance scales
+                # Apply conditioning dropout
                 if (
                     conditioning_type != "text"
                 ):  # text embeddings would already be in the right shape
                     conditioning = conditioning[:, None, None]
-
-                # Class conditioning dropout (for class-free guidance)
-                class_conditioning_mask = torch.rand_like(
-                    conditioning[:, 0:1, 0:1],
-                    device=accelerator.device,
-                    dtype=weight_dtype,
-                ) > config.get("drop_conditioning", 0.3)
-                conditioning = conditioning * class_conditioning_mask
-
-                # Frame conditioning dropout (for frame-free guidance) if using separate guidance
-                if config.use_separate_guidance:
-                    # This line checks if a random value is greater than the drop probability (0.3 by default)
-                    # If it's greater, the mask is 1, otherwise it's 0
-                    frame_conditioning_mask = torch.rand_like(
-                        ref_frame,
+                conditioning_mask = (
+                    torch.rand_like(
+                        conditioning[:, 0:1, 0:1],
                         device=accelerator.device,
                         dtype=weight_dtype,
-                    ) > config.get("drop_frame_conditioning", 0.3)
-                    # Then apply the mask to the reference frame
-                    ref_frame = ref_frame * frame_conditioning_mask  # .unsqueeze(1)
+                    )
+                    > uncond_p
+                )
+                conditioning = conditioning * conditioning_mask
 
                 # Replicate reference frame across time dimension
                 ref_frame = ref_frame[:, :, None, :, :].repeat(1, 1, T, 1, 1)
@@ -1158,35 +1067,12 @@ def parse_args():
         choices=["class_id", "lvef", "view", "text"],
         help="Type of conditioning to use",
     )
-    parser.add_argument(
-        "--condition_guidance_scale",
-        type=float,
-        default=5.0,
-        help="Guidance scale for class conditioning (1.0=no guidance, recommended range: 1.0-10.0, higher means stronger influence)",
-    )
-    parser.add_argument(
-        "--frame_guidance_scale",
-        type=float,
-        default=1.0,
-        help="Guidance scale for frame conditioning (1.0=no guidance, recommended range: 1.0-5.0, lower values reduce influence)",
-    )
-    parser.add_argument(
-        "--use_separate_guidance",
-        action="store_true",
-        help="Whether to use separate guidance scales for class and frame",
-    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     config = OmegaConf.load(args.config)
-
-    # Set guidance scale parameters from command line args
-    config.condition_guidance_scale = args.condition_guidance_scale
-    config.frame_guidance_scale = args.frame_guidance_scale
-    config.use_separate_guidance = args.use_separate_guidance
-
     # Set default validation samples if not in config
     if not hasattr(config, "num_validation_samples"):
         config.num_validation_samples = 4

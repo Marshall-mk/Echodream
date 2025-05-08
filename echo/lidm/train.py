@@ -63,8 +63,6 @@ CUDA_VISIBLE_DEVICES='2,3,4,5' accelerate launch
 	--training_mode diffusion 
 	--conditioning_type text
  	--condition_guidance_scale 5.0 
-	--frame_guidance_scale 1.0
-	--use_separate_guidance
 """
 
 def tokenize_text(text, tokenizer):

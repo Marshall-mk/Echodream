@@ -807,6 +807,8 @@ if __name__ == "__main__":
                     cond_values = conditioning.squeeze()[::TR].tolist()
                 elif args.conditioning_type == "view":
                     cond_values = conditioning.squeeze()[::TR].to(torch.int).tolist()
+                elif args.conditioning_type == "csv":
+                    cond_values = conditioning.squeeze()[::TR].to(torch.int).tolist()
                 else:  # text
                     cond_values = text_conditioning
 
