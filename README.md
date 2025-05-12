@@ -1,12 +1,20 @@
 ## Table of contents
-1. [Environment setup](#environment-setup)
-2. [Data preparation](#data-preparation)
-3. [The models](#the-models)
-4. [Training](#training)
-5. [Generating EchoNet-xx](#generating-echonet-xx)
-6. [Evaluation](#evaluation)
-7. [Results](#results)
-8. [Citation](#citation)
+- [Table of contents](#table-of-contents)
+- [Environment setup](#environment-setup)
+- [Data preparation](#data-preparation)
+  - [➡ Original datasets](#-original-datasets)
+  - [➡ Latent Video datasets for LVDM training](#-latent-video-datasets-for-lvdm-training)
+  - [➡ Validation datasets](#-validation-datasets)
+- [The Models](#the-models)
+  - [The VAE](#the-vae)
+  - [The LIDM](#the-lidm)
+  - [The Re-Identification model](#the-re-identification-model)
+  - [The LVDM](#the-lvdm)
+  - [Structure](#structure)
+- [Generating Cardiac-Synthetic](#generating-cardiac-synthetic)
+- [Evaluation](#evaluation)
+- [Results](#results)
+- [Citation](#citation)
 
 ## Environment setup
 <!-- <details open id="environment-setup">
@@ -36,35 +44,14 @@ How to install the external libraries is explained in the [External libraries](e
 <summary style="font-size: 1.5em; font-weight: bold;">Data preparation<hr></summary> -->
 
 ### ➡ Original datasets
-Download the EchoNet-Dynamic dataset from [here](https://echonet.github.io/dynamic/), the EchoNet-Pediatric dataset from [here](https://echonet.github.io/pediatric/), and the CardiacNet data from [here](https://www.kaggle.com/datasets/xiaoweixumedicalai/abnormcardiacechovideos). The datasets are available for free upon request. Once downloaded, extract the content of the archive in the `datasets` folder. For simplicity and consistency, we structure them like so (more info on cardiacnet below):
+Download the CardiacNet data from [here](https://www.kaggle.com/datasets/xiaoweixumedicalai/abnormcardiacechovideos). The dataset is available for free upon request. Once downloaded, extract the content of the archive in the `datasets` folder. For simplicity and consistency, we structure the data like so:
 ```
 datasets
-├── EchoNet-Dynamic
-│   ├── Videos
-│   ├── FileList.csv
-│   └── VolumeTracings.csv
-├── CardiacNet
-│   ├── Videos
-│   └── FileList.csv
-└── EchoNet-Pediatric
-    ├── A4C
-    │   ├── Videos
-    │   ├── FileList.csv
-    │   └── VolumeTracings.csv
-    └── PSAX
-        ├── Videos
-        ├── FileList.csv
-        └── VolumeTracings.csv
+└── CardiacNet
+    ├── Videos
+    └── FileList.csv
 ```
-
-To harmonize the datasets, we add some information to the `FileList.csv` files of the EchoNet-Pediatric dataset, namely FrameHeight, FrameWidth, FPS, NumberOfFrames. We also arbitrarily set the splits from the 10-fold indices to a simple TRAIN/VAL/TEST split. These updates ares applied with the following command:
-
-```bash
-python scripts/complete_pediatrics_filelist.py --dataset datasets/EchoNet-Pediatric/A4C
-python scripts/complete_pediatrics_filelist.py --dataset datasets/EchoNet-Pediatric/PSAX
-```
-
-We also restructured the CardiacNet dataset to include a 'Videos' directory as well as a 'FileList.csv' file. This is done with the following commands:
+We restructured the CardiacNet dataset to include a 'Videos' directory as well as a 'FileList.csv' file. This is done with the following commands:
 
 ```bash
 python scripts/1process_cardiacnetdata.py \
@@ -87,59 +74,22 @@ This is crucial for the other scripts to work properly.
 The LVDM is trained on pre-encoded latent representations of the videos. To encode the videos, we use the image VAE. You can either retrain the VAE or download it from [here](https://huggingface.co/HReynaud/EchoNet-Synthetic/tree/main/vae). Once you have the VAE, you can encode the videos with the following command:
 
 ```bash
-# For the EchoNet-Dynamic dataset
-python scripts/5encode_video_dataset.py \
-    --model models/vae \
-    --input datasets/EchoNet-Dynamic \
-    --output data/latents/dynamic \
-    --gray_scale
-```
-```bash
-# For the CardiacNet dataset
 python scripts/5encode_video_dataset.py \
     --model models/vae \
     --input datasets/CardiacNet \
     --output data/latents/cardiacnet \
     --gray_scale
 ```
-```bash
-# For the EchoNet-Pediatric datasets
-python scripts/5encode_video_dataset.py \
-    --model models/vae \
-    --input datasets/EchoNet-Pediatric/A4C \
-    --output data/latents/ped_a4c \
-    --gray_scale
-
-python scripts/5encode_video_dataset.py \
-    --model models/vae \
-    --input datasets/EchoNet-Pediatric/PSAX \
-    --output data/latents/ped_psax \
-    --gray_scale
-```
 
 ### ➡ Validation datasets
 
-To quantitatively evaluate the quality of the generated images and videos, we use the StyleGAN-V repo.
-We cover the evaluation process in the [Evaluation](#evaluation) section.
-To enable this evaluation, we need to prepare the validation datasets. We do that with the following command:
-
-```bash
-python scripts/4create_reference_dataset.py --dataset datasets/EchoNet-Dynamic --output data/reference/dynamic --frames 128
-```
+To quantitatively evaluate the quality of the generated images and videos, we use the StyleGAN-V repo. We cover the evaluation process in the [Evaluation](#evaluation) section. To enable this evaluation, we need to prepare the validation datasets. We do that with the following command:
 
 ```bash
 python scripts/4create_reference_dataset.py --dataset datasets/CardiacNet --output data/reference/cardiacnet --frames 16
 ```
 
-```bash
-python scripts/4create_reference_dataset.py --dataset datasets/EchoNet-Pediatric/A4C --output data/reference/ped_a4c --frames 16
-```
-
-```bash
-python scripts/4create_reference_dataset.py --dataset datasets/EchoNet-Pediatric/PSAX --output data/reference/ped_psax --frames 16
-```
-
-Note that the CardiacNet and Pediatric datasets do not support 128 frames, preventing the computation of FVD_128, because there are not enough videos lasting more 4 seconds or more. We therefore only extract 16 frames per video for these datasets.
+Note that the CardiacNet dataset does not support 128 frames, preventing the computation of FVD_128, because there are not enough videos lasting more 4 seconds or more. We therefore only extract 16 frames per video for these datasets.
 
 Finally, we convert the CardiacNet videos to images to enable downstream classification:
 
@@ -156,146 +106,90 @@ python scripts/6video_to_jpg.py \
 
 ![Models](ressources/models.jpg)
 
-*Our pipeline, using our models: LVDM and VAE*
+*Our pipeline, using our models: LIDM, Re-Identification (Privacy), LVDM and VAE*
 
 
 ### The VAE
 
 You can download the pretrained VAE from [here](https://huggingface.co/HReynaud/EchoNet-Synthetic/tree/main/vae)
 
-### The LVDMS
+### The LIDM
 
-You can download the pretrained LVDMS from [here](https://xx) or train it yourself by following the instructions in the [LVDM training](#training) section.
+You can download the pretrained LIDM from [here](https://xx) or train it yourself by following the instructions in the [LIDM training](echo/lidm/README.md) section.
+
+### The Re-Identification model
+
+You can download the pretrained Re-Identification models from [here](https://xx) or train it yourself by following the instructions in the [Re-Identification training](echo/privacy/README.md) section.
+
+### The LVDM
+
+You can download the pretrained LVDMS from [here](https://xx) or train it yourself by following the instructions in the [LVDM training](echo/lvdm/README.md) section.
 
 ### Structure
 
 The models should be structured as follows:
 ```
 models
-├── lvdm
+├── classification
+├── lidm_cardiacnet
 ├── lvdm_cardiacnet
+├── reidentification_cardiacnet
 └── vae
 ```
 
 <!-- </details> -->
-## TRAINING
-<!-- <details open id="training">
-<summary style="font-size: 1.5em; font-weight: bold;">Training the video models<hr></summary> -->
-We trained two video models, one with text conditioning on all datasets and another with class conditioning on only the cardiacnet dataset.
+## Generating Cardiac-Synthetic
+<!-- <details open id="cardiac-synthetic">
+<summary style="font-size: 1.5em; font-weight: bold;">Generating Cardiac-Synthetic<hr></summary> -->
 
+Now that we have all the necessary models, we can generate the synthetic dataset following the steps below:
+- Generate a collection of latent heart images with the LIDM (usually 2x the amount of videos we are targetting)
+- Apply the privacy check, which will filter out some of the latent images
+- Generate the videos with the LVDM, and decode them with the VAE
 ```bash
-# 	WITH TEXT CONDITIONING
-CUDA_VISIBLE_DEVICES='0,1,2,3' accelerate launch  
-	--num_processes 4  
-	--multi_gpu   
-	--mixed_precision fp16 
-	-m  echo.lvdm.train  
-	--config echo/lvdm/configs/default.yaml 
-	--training_mode diffusion 
-	--conditioning_type text
-```
-```bash
-#	WITH CLASS CONDITIONING
-
-CUDA_VISIBLE_DEVICES='0,1,2,3' accelerate launch  
-	--num_processes 4  
-	--multi_gpu   
-	--mixed_precision fp16 
-	-m  echo.lvdm.train  
-	--config echo/lvdm/configs/cardiacnet.yaml 
-	--training_mode diffusion 
-	--conditioning_type class_id
+CUDA_VISIBLE_DEVICES='0' python -m echo.lidm.sample  \
+	--config echo/lidm/configs/cardiacnet.yaml   \
+	--unet models/lidm_cardiacnet   \
+	--vae models/vae   \
+	--output samples/lidm_cardiacnet  \
+	--num_samples 2000    \
+	--batch_size 256    \
+	--num_steps 256     \
+	--save_latent   \
+	--sampling_mode diffusion \
+	--conditioning_type class_id \
+	--class_ids 4 \
+    --condition_guidance_scale 5.0 \
+    --seed 0
 ```
 
-<!-- </details> -->
-## Generating EchoNet-xx
-<!-- <details open id="echonet-xx">
-<summary style="font-size: 1.5em; font-weight: bold;">Generating EchoNet-xx<hr></summary> -->
+Then, we filter the latent images with the re-identification model:
+```bash
+python -m echo.privacy.apply  \
+    --model models/reidentification_cardiacnet   \
+    --synthetic samples/lidm_cardiacnet/latents  \
+    --reference data/latents/cardiacnet    \
+    --output samples/lidm_cardiacnet/privacy_compliant_latents
+```
 
-Now that we have all the necessary models, we can generate the synthetic datasets. The process is the same for all datasets and involves using the real latent images.
-
-#### Dynamic dataset
 We generate the synthetic videos with the LVDM:
 ```bash
-CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  
-	--config echo/lvdm/configs/default.yaml   
-	--unet ./models/lvdm/checkpoint-100000/unet_ema   
-	--vae ./models/vae   
-	--conditioning ./data/latents/dynamic/Latents   
-	--output ./samples/lvdm_dynamic_with_text
-	--num_samples 2000    
-	--batch_size 16    
-	--num_steps 256     
-	--save_as mp4,jpg    
-	--frames 192 
-	--sampling_mode diffusion 
-	--conditioning_type text
-```
-
-#### Cardiacnet dataset
-```bash
-CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  
-	--config echo/lvdm/configs/default.yaml   
-	--unet ./models/lvdm/checkpoint-100000/unet_ema   
-	--vae ./models/vae   
-	--conditioning ./data/latents/cardiacnet/Latents   
-	--output ./samples/lvdm_cardiac_with_text
-	--num_samples 2000    
-	--batch_size 16    
-	--num_steps 256     
-	--save_as mp4,jpg    
-	--frames 192 
-	--sampling_mode diffusion 
-	--conditioning_type text
-```
-
-#### pediatric datasets
-```bash
-CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  
-	--config echo/lvdm/configs/default.yaml   
-	--unet ./models/lvdm/checkpoint-100000/unet_ema   
-	--vae ./models/vae   
-	--conditioning ./data/latents/ped_a4c/Latents   
-	--output ./samples/lvdm_ped_a4c_with_text
-	--num_samples 2000    
-	--batch_size 16    
-	--num_steps 256     
-	--save_as mp4,jpg    
-	--frames 192 
-	--sampling_mode diffusion 
-	--conditioning_type text
-
-CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  
-	--config echo/lvdm/configs/default.yaml   
-	--unet ./models/lvdm/checkpoint-100000/unet_ema   
-	--vae ./models/vae   
-	--conditioning ./data/latents/ped_psax/Latents   
-	--output ./samples/lvdm_ped_psax_with_text
-	--num_samples 2000    
-	--batch_size 16    
-	--num_steps 256     
-	--save_as mp4,jpg    
-	--frames 192 
-	--sampling_mode diffusion 
-	--conditioning_type text
-```
-We can use the class conditioned lvdm model to generate the Cardiac-Synthetic dataset using:
-
-```bash
-CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  
-	--config echo/lvdm/configs/cardiacnet.yaml   
-	--unet ./models/lvdm_cardiacnet/checkpoint-100000/unet_ema   
-	--vae ./models/vae   
-	--conditioning ./data/latents/cardiacnet/Latents   
-	--output ./samples/lvdm_cardiacnet  
-	--num_samples 655    
-	--batch_size 16    
-	--num_steps 256     
-	--save_as mp4,jpg    
-	--frames 192 
-	--sampling_mode diffusion 
-	--conditioning_type class_id 
-	--class_ids 4
+CUDA_VISIBLE_DEVICES='0' python -m echo.lvdm.sample  \
+    --config echo/lvdm/configs/cardiacnet.yaml   \
+    --unet models/lvdm_cardiacnet  \
+    --vae Echodream/models/vae   \
+    --conditioning samples/lidm_cardiacnet/privacy_compliant_latents  \
+    --output samples/lvdm_cardiacnet  \
+    --num_samples 655    \
+    --batch_size 24    \
+    --num_steps 256     \
+    --save_as mp4,jpg    \
+    --frames 192 \
+    --sampling_mode diffusion \
+    --conditioning_type csv  \
+    --condition_guidance_scale 5 \
+    --frame_guidance_scale 1  \
+    --use_separate_guidance
 ```
 
 Finally, we prepare the synthetic data for downstream evaluation
@@ -319,46 +213,36 @@ python scripts/update_synt_file.py
 ## Evaluation
 <!-- <details open id="evaluation">
 <summary style="font-size: 1.5em; font-weight: bold;">Evaluation<hr></summary> -->
-We evaluate the generative performance of both the class-conditioned and text-conditioned models using the StyleGAN-V library
+As the final step, we evaluate the quality of Cardiac-Synthetic videos by training two binary classification models on the synthetic data and evaluating it on the real data. To do so, follow the instructions [here](echo/classification/README.md).
 
-```bash	
-cd external/stylegan-v
+</details>
+
+## Results
+<!-- <details open id="results">
+<summary style="font-size: 1.5em; font-weight: bold;">Results<hr></summary> -->
+
+<p>Here is a side by side comparison between a real and a synthetic video.</p>
+
+<table style="width:auto; border:1px solid black; text-align:center;">
+    <tr>
+        <th style="padding:10px; border:1px solid black;">Real Video</th>
+        <th style="padding:10px; border:1px solid black;">Reproduction</th>
+    </tr>
+    <tr>
+        <td style="padding:10px; border:1px solid black;"><img src="ressources/real.gif" alt="Real Video"></td>
+        <td style="padding:10px; border:1px solid black;"><img src="ressources/synt.gif" alt="Reproduction"></td>
+    </tr>
+</table>
+
+<p>Here we show a collection of synthetic videos from Cardiac-Synthetic.</p>
+
+![Mosaic](ressources/mosaic.gif)
+
+<!-- </details> -->
+
+<!-- ## Citation -->
+## Citation
+
 ```
-
-```bash	
-# WITH TEXT CONDITIONING
-CUDA_VISIBLE_DEVICES='0' python src/scripts/calc_metrics_for_dataset.py
-	--real_data_path ./data/reference/cardiacnet
-	--fake_data_path ./samples/lvdm_cardiac_with_text/jpg 
-	--mirror 0 --gpus 1 --resolution 112  
-	--metrics fvd2048_16f,fid50k_full,is50k >> "./samples/lvdm_cardiac_with_text/metrics.txt"
-
-CUDA_VISIBLE_DEVICES='0' python src/scripts/calc_metrics_for_dataset.py
-	--real_data_path ./data/reference/ped_psax
-	--fake_data_path ./samples/lvdm_ped_psax_with_text/jpg 
-	--mirror 0 --gpus 1 --resolution 112  
-	--metrics fvd2048_16f,fid50k_full,is50k >> "./samples/lvdm_ped_psax_with_text/metrics.txt"
-
-CUDA_VISIBLE_DEVICES='0' python src/scripts/calc_metrics_for_dataset.py
-	--real_data_path ./data/reference/ped_a4c
-	--fake_data_path ./samples/lvdm_ped_a4c_with_text/jpg 
-	--mirror 0 --gpus 1 --resolution 112  
-	--metrics fvd2048_16f,fid50k_full,is50k >> "./samples/lvdm_ped_a4c_with_text/metrics.txt"
-
-CUDA_VISIBLE_DEVICES='0' python src/scripts/calc_metrics_for_dataset.py
-	--real_data_path ./data/reference/dynamic
-	--fake_data_path ./samples/lvdm_dynamic_with_text/jpg 
-	--mirror 0 --gpus 1 --resolution 112  
-	--metrics fvd2048_16f,fvd2048_128f,fid50k_full,is50k >> "./samples/lvdm_dynamic_with_text/metrics.txt"
-```		
-
-```bash		
-# WITH CLASS CONDITIONING
-CUDA_VISIBLE_DEVICES='0' python src/scripts/calc_metrics_for_dataset.py
-	--real_data_path ./data/reference/cardiacnet
-	--fake_data_path ./samples/lvdm_cardiacnet/jpg 
-	--mirror 0 --gpus 1 --resolution 112  
-	--metrics fvd2048_16f,fid50k_full,is50k >> "./samples/lvdm_cardiacnet/metrics.txt"
+@inproceedings{xx}
 ```
-
-We evaluate the class-conditioned model on a classification task. We do these following the steps below:

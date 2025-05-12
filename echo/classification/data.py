@@ -71,7 +71,7 @@ class VideoDataset(Dataset):
 
         if self.use_synthetic and self.use_synthetic_for_current_split:
             synthetic_df = pd.read_csv(synthetic_csv_path)
-            synthetic_df = synthetic_df[synthetic_df["split"] == split].reset_index(
+            synthetic_df = synthetic_df[synthetic_df["Split"] == split].reset_index(
                 drop=True
             )
             self.df = synthetic_df
