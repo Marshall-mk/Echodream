@@ -65,6 +65,7 @@ CUDA_VISIBLE_DEVICES='2,3,4,5' accelerate launch
  	--condition_guidance_scale 5.0 
 """
 
+
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
     tokenized_text = tokenizer(

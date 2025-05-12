@@ -81,31 +81,32 @@ def tokenize_text(text, tokenizer):
 def compute_validation_metrics(generated_videos, reference_videos):
     """Compute validation metrics between generated and reference videos."""
     metrics = {}
-    
+
     # Calculate SSIM
     ssim_values = []
     for i in range(len(generated_videos)):
         ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
         ssim_values.append(ssim_val)
-    metrics['ssim'] = np.mean(ssim_values)
-    
+    metrics["ssim"] = np.mean(ssim_values)
+
     # Calculate PSNR
     psnr_values = []
     for i in range(len(generated_videos)):
         psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
         psnr_values.append(psnr_val)
-    metrics['psnr'] = np.mean(psnr_values)
-    
+    metrics["psnr"] = np.mean(psnr_values)
+
     # You could add other metrics like FID if you have a pretrained model
-    
+
     return metrics
+
 
 def calculate_ssim(generated_video, reference_video):
     """Calculate SSIM between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-    
+
     # Calculate SSIM for each frame
     ssim_values = []
     for i in range(generated_video.shape[0]):
@@ -113,15 +114,16 @@ def calculate_ssim(generated_video, reference_video):
             generated_video[i], reference_video[i], multichannel=True
         )
         ssim_values.append(ssim_val)
-    
+
     return np.mean(ssim_values)
+
 
 def calculate_psnr(generated_video, reference_video):
     """Calculate PSNR between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-    
+
     # Calculate PSNR for each frame
     psnr_values = []
     for i in range(generated_video.shape[0]):
@@ -131,7 +133,7 @@ def calculate_psnr(generated_video, reference_video):
         else:
             psnr_val = 20 * np.log10(255.0 / np.sqrt(mse))
             psnr_values.append(psnr_val)
-    
+
     return np.mean(psnr_values)
 
 
@@ -318,7 +320,7 @@ def log_validation(
                     dummy_added_time_ids = torch.zeros(
                         (B, config.unet.addition_time_embed_dim),
                         device=accelerator.device,
-                        dtype=weight_dtype, 
+                        dtype=weight_dtype,
                     )
                     forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
@@ -749,14 +751,14 @@ def train(
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
 
-                    # Add a seed reset before processing text through CLIP to avoid 
+                    # Add a seed reset before processing text through CLIP to avoid
                     # potential RNG state corruption across processes
                     if torch.distributed.is_initialized():
                         # Manually reset seed to avoid mt19937 state corruption
                         torch.manual_seed(1000 + global_step)
                         if torch.cuda.is_available():
                             torch.cuda.manual_seed_all(1000 + global_step)
-                    
+
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
