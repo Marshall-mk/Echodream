@@ -13,21 +13,13 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 import warnings
 import matplotlib.pyplot as plt
-from sklearn.metrics import (
-    confusion_matrix,
-    roc_curve,
-    auc,
-    precision_recall_curve,
-    average_precision_score,
-    f1_score,
-    precision_score,
-    recall_score,
-)
+from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve, average_precision_score, f1_score, precision_score, recall_score
 from sklearn.preprocessing import label_binarize
 import seaborn as sns
 from itertools import cycle
 from sklearn.model_selection import KFold
 import pandas as pd
+from sklearn.metrics import roc_auc_score
 
 
 warnings.filterwarnings("ignore")
@@ -107,6 +99,8 @@ def validate(model, dataloader, criterion, accelerator):
     running_loss = 0.0
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
 
     with torch.no_grad():
         for inputs, targets in dataloader:
@@ -118,6 +112,10 @@ def validate(model, dataloader, criterion, accelerator):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
+            # Collect predictions and targets for AUC-ROC
+            all_preds.extend(predicted.cpu().numpy())
+            all_targets.extend(targets.cpu().numpy())
+
     # Convert metrics to tensors before gathering
     loss_tensor = torch.tensor(
         running_loss / len(dataloader), device=accelerator.device
@@ -128,12 +126,16 @@ def validate(model, dataloader, criterion, accelerator):
     loss_tensor = accelerator.gather(loss_tensor).mean()
     acc_tensor = accelerator.gather(acc_tensor).mean()
 
+    # Calculate AUC-ROC (only on main process)
     if accelerator.is_local_main_process:
+        auc_roc = roc_auc_score(all_targets, all_preds, multi_class="ovr")
         print(
-            f"Validation Loss: {loss_tensor.item():.4f} | Validation Acc: {acc_tensor.item():.2f}%"
+            f"Validation Loss: {loss_tensor.item():.4f} | Validation Acc: {acc_tensor.item():.2f}% | AUC-ROC: {auc_roc:.4f}"
         )
+    else:
+        auc_roc = None
 
-    return loss_tensor.item(), acc_tensor.item()
+    return loss_tensor.item(), acc_tensor.item(), auc_roc
 
 
 def test(model, dataloader, accelerator):
@@ -166,16 +168,20 @@ def test(model, dataloader, accelerator):
     # Gather and reduce metrics from all processes
     acc_tensor = accelerator.gather(acc_tensor).mean()
 
+    # Calculate AUC-ROC (only on main process)
     if accelerator.is_local_main_process:
-        print(f"Test Acc: {acc_tensor.item():.2f}%")
+        auc_roc = roc_auc_score(all_targets, all_preds, multi_class="ovr")
+        print(f"Test Acc: {acc_tensor.item():.2f}% | AUC-ROC: {auc_roc:.4f}")
+    else:
+        auc_roc = None
 
-    return acc_tensor.item(), all_preds, all_targets
+    return acc_tensor.item(), all_preds, all_targets, auc_roc
 
 
 def calculate_and_plot_metrics(all_preds, all_targets, classes, output_dir):
     """
     Calculate and plot metrics for model evaluation
-
+    
     Args:
         all_preds: numpy array of model predictions
         all_targets: numpy array of true labels
@@ -184,117 +190,111 @@ def calculate_and_plot_metrics(all_preds, all_targets, classes, output_dir):
     """
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(exist_ok=True)
-
+    
     # Convert to numpy arrays if not already
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
-
+    
     # 1. Confusion Matrix
     cm = confusion_matrix(all_targets, all_preds)
     plt.figure(figsize=(10, 8))
-    sns.heatmap(
-        cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes
-    )
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.title("Confusion Matrix")
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
     plt.tight_layout()
     plt.savefig(metrics_dir / "confusion_matrix.png", dpi=300)
     plt.close()
-
+    
     # 2. Calculate metrics
     accuracy = np.mean(all_preds == all_targets)
-    precision = precision_score(
-        all_targets, all_preds, average="macro", zero_division=0
-    )
-    recall = recall_score(all_targets, all_preds, average="macro", zero_division=0)
-    f1 = f1_score(all_targets, all_preds, average="macro", zero_division=0)
-
+    precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+    
     metrics = {
-        "accuracy": float(accuracy),
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1_score": float(f1),
+        'accuracy': float(accuracy),
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1_score': float(f1)
     }
-
+    
     # Save metrics to file
     with open(metrics_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=4)
-
+    
     # 3. ROC curve and AUC (one vs rest for multiclass)
     n_classes = len(classes)
-
+    
     # Check if we need to compute ROC curves (need probabilistic outputs)
     if n_classes > 2:  # Multiclass case
         # For demonstration, we'll create a dummy probabilistic output
         # In a real scenario, you would need to capture model.predict_proba() results
-
+        
         # Binarize the labels for one-vs-rest ROC
         y_bin = label_binarize(all_targets, classes=range(n_classes))
-
+        
         plt.figure(figsize=(10, 8))
-
+        
         # For each class, calculate class-specific metrics
         class_metrics = {}
         for i in range(n_classes):
             # Create binary labels for this class
             y_true_bin = (all_targets == i).astype(np.int32)
             y_pred_bin = (all_preds == i).astype(np.int32)
-
+            
             # Calculate AUC using the binary predictions
             fpr, tpr, _ = roc_curve(y_true_bin, y_pred_bin)
             roc_auc = auc(fpr, tpr)
-
+            
             # Plot ROC curve
-            plt.plot(fpr, tpr, lw=2, label=f"Class {classes[i]} (AUC = {roc_auc:.2f})")
-
+            plt.plot(fpr, tpr, lw=2, label=f'Class {classes[i]} (AUC = {roc_auc:.2f})')
+            
             # Store class metrics
             class_metrics[classes[i]] = {
-                "precision": float(
-                    precision_score(y_true_bin, y_pred_bin, zero_division=0)
-                ),
-                "recall": float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
-                "f1_score": float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
-                "auc": float(roc_auc),
+                'precision': float(precision_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'recall': float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'f1_score': float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
+                'auc': float(roc_auc)
             }
-
+        
         # Save class-specific metrics
         with open(metrics_dir / "class_metrics.json", "w") as f:
             json.dump(class_metrics, f, indent=4)
-
-        plt.plot([0, 1], [0, 1], "k--", lw=2)
+        
+        plt.plot([0, 1], [0, 1], 'k--', lw=2)
         plt.xlim([0.0, 1.0])
         plt.ylim([0.0, 1.05])
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("One-vs-Rest ROC Curves")
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('One-vs-Rest ROC Curves')
         plt.legend(loc="lower right")
         plt.grid(True)
         plt.tight_layout()
         plt.savefig(metrics_dir / "roc_curves.png", dpi=300)
         plt.close()
-
+    
     # 4. Class distribution
     plt.figure(figsize=(12, 6))
-
+    
     # True distribution
     plt.subplot(1, 2, 1)
-    sns.countplot(x=all_targets, palette="viridis")
-    plt.title("True Class Distribution")
-    plt.xlabel("Class")
-    plt.xticks(range(len(classes)), classes, rotation=45, ha="right")
-
+    sns.countplot(x=all_targets, palette='viridis')
+    plt.title('True Class Distribution')
+    plt.xlabel('Class')
+    plt.xticks(range(len(classes)), classes, rotation=45, ha='right')
+    
     # Predicted distribution
     plt.subplot(1, 2, 2)
-    sns.countplot(x=all_preds, palette="viridis")
-    plt.title("Predicted Class Distribution")
-    plt.xlabel("Class")
-    plt.xticks(range(len(classes)), classes, rotation=45, ha="right")
-
+    sns.countplot(x=all_preds, palette='viridis')
+    plt.title('Predicted Class Distribution')
+    plt.xlabel('Class')
+    plt.xticks(range(len(classes)), classes, rotation=45, ha='right')
+    
     plt.tight_layout()
     plt.savefig(metrics_dir / "class_distribution.png", dpi=300)
     plt.close()
-
+    
     return metrics
 
 
@@ -374,7 +374,7 @@ def parse_args():
         choices=["avg", "max", "attention"],
         help="Type of temporal pooling",
     )
-
+    
     # Cross-validation options
     parser.add_argument(
         "--use-cross-val",
@@ -439,12 +439,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def train_and_evaluate_cv_fold(
-    fold_idx, train_dataset, val_dataset, test_dataset, args, output_dir, accelerator
-):
+def train_and_evaluate_cv_fold(fold_idx, train_dataset, val_dataset, test_dataset, args, output_dir, accelerator):
     """
     Train and evaluate a single fold in the cross-validation process
-
+    
     Args:
         fold_idx: Current fold index
         train_dataset: Training dataset for this fold
@@ -453,7 +451,7 @@ def train_and_evaluate_cv_fold(
         args: Command line arguments
         output_dir: Output directory
         accelerator: Accelerator instance
-
+        
     Returns:
         val_acc: Validation accuracy for this fold
         test_acc: Test accuracy for this fold
@@ -464,10 +462,10 @@ def train_and_evaluate_cv_fold(
         writer = SummaryWriter(log_dir=str(fold_dir / "logs"))
     else:
         writer = None
-
+    
     if accelerator.is_local_main_process:
         print(f"\n---- Training Fold {fold_idx} ----")
-
+    
     # Create dataloaders
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -477,7 +475,7 @@ def train_and_evaluate_cv_fold(
         pin_memory=args.pin_memory,
         drop_last=True,
     )
-
+    
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -485,7 +483,7 @@ def train_and_evaluate_cv_fold(
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
     )
-
+    
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=args.batch_size,
@@ -493,64 +491,60 @@ def train_and_evaluate_cv_fold(
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
     )
-
+    
     # Create model
     num_classes = len(train_dataset.classes)
     model_kwargs = {"num_classes": num_classes}
-
+    
     if args.backbone in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
         model_kwargs["pretrained"] = args.pretrained
         model_kwargs["pool_type"] = args.pool_type
     elif args.backbone in ["r3d_18", "r2plus1d_18"]:
         model_kwargs["pretrained"] = args.pretrained
         model_kwargs["dropout_prob"] = 0.5
-
+    
     model = get_video_classifier(
         num_classes=model_kwargs.pop("num_classes"),
         backbone=args.backbone,
         **model_kwargs,
     )
-
+    
     criterion = nn.CrossEntropyLoss(
         weight=train_dataset.class_weights.to(accelerator.device)
     )
-    optimizer = optim.SGD(
-        model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay
-    )
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
-
+    
     # Prepare for distributed training
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
     test_loader = accelerator.prepare(test_loader)
-
+    
     best_val_acc = 0.0
-
+    
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, accelerator, epoch
         )
-
-        val_loss, val_acc = validate(model, val_loader, criterion, accelerator)
-
+        
+        val_loss, val_acc, _ = validate(model, val_loader, criterion, accelerator)
+        
         # Update learning rate
         scheduler.step()
-
+        
         # Log metrics
         if accelerator.is_local_main_process and writer is not None:
             writer.add_scalar(f"Fold_{fold_idx}/Loss/train", train_loss, epoch)
             writer.add_scalar(f"Fold_{fold_idx}/Accuracy/train", train_acc, epoch)
             writer.add_scalar(f"Fold_{fold_idx}/Loss/val", val_loss, epoch)
             writer.add_scalar(f"Fold_{fold_idx}/Accuracy/val", val_acc, epoch)
-            writer.add_scalar(
-                f"Fold_{fold_idx}/LearningRate", optimizer.param_groups[0]["lr"], epoch
-            )
-
+            writer.add_scalar(f"Fold_{fold_idx}/LearningRate", optimizer.param_groups[0]["lr"], epoch)
+        
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-
+            
             if accelerator.is_local_main_process:
                 # Unwrap model before saving
                 unwrapped_model = accelerator.unwrap_model(model)
@@ -564,43 +558,41 @@ def train_and_evaluate_cv_fold(
                     },
                     fold_dir / "best_model.pth",
                 )
-
+    
     # Test the model using the best weights
     accelerator.wait_for_everyone()
-
+    
     checkpoint = torch.load(
         fold_dir / "best_model.pth", map_location=accelerator.device
     )
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.load_state_dict(checkpoint["model_state_dict"])
-
-    test_acc, all_preds, all_targets = test(model, test_loader, accelerator)
-
+    
+    test_acc, all_preds, all_targets, _ = test(model, test_loader, accelerator)
+    
     if accelerator.is_local_main_process:
         if writer is not None:
             writer.add_scalar(f"Fold_{fold_idx}/Accuracy/test", test_acc, 0)
             writer.close()
-
+            
         np.savez(
             fold_dir / "test_results.npz",
             predictions=all_preds,
             targets=all_targets,
             accuracy=test_acc,
         )
-
+        
         classes = train_dataset.classes
         metrics = calculate_and_plot_metrics(all_preds, all_targets, classes, fold_dir)
-        print(
-            f"Fold {fold_idx} metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}"
-        )
-
+        print(f"Fold {fold_idx} metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}")
+        
     return best_val_acc, test_acc
 
 
 def run_cross_validation(args, output_dir, accelerator):
     """
     Run k-fold cross-validation
-
+    
     Args:
         args: Command line arguments
         output_dir: Output directory
@@ -608,16 +600,16 @@ def run_cross_validation(args, output_dir, accelerator):
     """
     # Load dataset metadata
     df = pd.read_csv(args.csv_path)
-
+    
     # Combine train and validation data for cross-validation
     train_val_df = df[df["Split"].isin(["TRAIN", "VAL"])].reset_index(drop=True)
-
+    
     # Set up k-fold cross validation
     kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=args.seed)
-
+    
     # Get test dataset
     from echo.classification.data import get_video_transforms
-
+    
     test_transform = get_video_transforms("test")
     test_dataset = VideoDataset(
         csv_path=args.csv_path,
@@ -632,30 +624,30 @@ def run_cross_validation(args, output_dir, accelerator):
         use_synthetic_for_split=args.use_synthetic_for,
         selected_classes=args.selected_classes,
     )
-
+    
     # Setup for storing results
     fold_val_results = []
     fold_test_results = []
-
+    
     # Run k-fold cross validation
     for fold_idx, (train_idx, val_idx) in enumerate(kf.split(train_val_df)):
         # Create train and validation splits for this fold
         fold_train_df = train_val_df.iloc[train_idx].copy()
         fold_val_df = train_val_df.iloc[val_idx].copy()
-
+        
         # Set appropriate split values
         fold_train_df["Split"] = "TRAIN"
         fold_val_df["Split"] = "VAL"
-
+        
         # Save fold datasets temporarily
         fold_csv_path = output_dir / f"fold_{fold_idx}_split.csv"
         combined_df = pd.concat([fold_train_df, fold_val_df, df[df["Split"] == "TEST"]])
         combined_df.to_csv(fold_csv_path, index=False)
-
+        
         # Create datasets for this fold
         train_transform = get_video_transforms("train")
         val_transform = get_video_transforms("val")
-
+        
         train_dataset = VideoDataset(
             csv_path=fold_csv_path,
             data_dir=args.data_dir,
@@ -669,7 +661,7 @@ def run_cross_validation(args, output_dir, accelerator):
             use_synthetic_for_split=args.use_synthetic_for,
             selected_classes=args.selected_classes,
         )
-
+        
         val_dataset = VideoDataset(
             csv_path=fold_csv_path,
             data_dir=args.data_dir,
@@ -683,40 +675,28 @@ def run_cross_validation(args, output_dir, accelerator):
             use_synthetic_for_split=args.use_synthetic_for,
             selected_classes=args.selected_classes,
         )
-
+        
         # Train and evaluate this fold
         val_acc, test_acc = train_and_evaluate_cv_fold(
-            fold_idx,
-            train_dataset,
-            val_dataset,
-            test_dataset,
-            args,
-            output_dir,
-            accelerator,
+            fold_idx, train_dataset, val_dataset, test_dataset, args, output_dir, accelerator
         )
-
+        
         fold_val_results.append(val_acc)
         fold_test_results.append(test_acc)
-
+        
         # Clean up temporary CSV
         if accelerator.is_local_main_process:
             fold_csv_path.unlink()
-
+    
     # Summarize cross-validation results
     if accelerator.is_local_main_process:
         print("\n---- Cross-Validation Results ----")
         for fold_idx in range(args.num_folds):
-            print(
-                f"Fold {fold_idx}: Val accuracy = {fold_val_results[fold_idx]:.2f}%, Test accuracy = {fold_test_results[fold_idx]:.2f}%"
-            )
-
-        print(
-            f"\nMean validation accuracy: {np.mean(fold_val_results):.2f}% ± {np.std(fold_val_results):.2f}%"
-        )
-        print(
-            f"Mean test accuracy: {np.mean(fold_test_results):.2f}% ± {np.std(fold_test_results):.2f}%"
-        )
-
+            print(f"Fold {fold_idx}: Val accuracy = {fold_val_results[fold_idx]:.2f}%, Test accuracy = {fold_test_results[fold_idx]:.2f}%")
+        
+        print(f"\nMean validation accuracy: {np.mean(fold_val_results):.2f}% ± {np.std(fold_val_results):.2f}%")
+        print(f"Mean test accuracy: {np.mean(fold_test_results):.2f}% ± {np.std(fold_test_results):.2f}%")
+        
         # Save cross-validation summary
         cv_results = {
             "fold_val_accuracies": fold_val_results,
@@ -726,7 +706,7 @@ def run_cross_validation(args, output_dir, accelerator):
             "mean_test_accuracy": float(np.mean(fold_test_results)),
             "std_test_accuracy": float(np.std(fold_test_results)),
         }
-
+        
         with open(output_dir / "cv_results.json", "w") as f:
             json.dump(cv_results, f, indent=4)
 
@@ -773,7 +753,6 @@ def main():
     # Execute cross-validation if enabled
     if args.use_cross_val:
         import pandas as pd
-
         run_cross_validation(args, output_dir, accelerator)
         return
 
@@ -837,9 +816,7 @@ def main():
     criterion = nn.CrossEntropyLoss(
         weight=dataloaders["train"].dataset.class_weights.to(accelerator.device)
     )
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay
-    )
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # Prepare for distributed training with accelerate
@@ -859,7 +836,7 @@ def main():
             model, train_dataloader, criterion, optimizer, accelerator, epoch
         )
 
-        val_loss, val_acc = validate(model, val_dataloader, criterion, accelerator)
+        val_loss, val_acc, _ = validate(model, val_dataloader, criterion, accelerator)
 
         # Update learning rate
         scheduler.step()
@@ -920,32 +897,36 @@ def main():
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.load_state_dict(checkpoint["model_state_dict"])
 
-    test_acc, all_preds, all_targets = test(model, test_dataloader, accelerator)
+    test_acc, all_preds, all_targets, test_auc_roc = test(model, test_dataloader, accelerator)
 
     # Save test results (only on main process)
     if accelerator.is_local_main_process:
         if writer is not None:
             writer.add_scalar("Accuracy/test", test_acc, 0)
+            writer.add_scalar("AUC-ROC/test", test_auc_roc, 0)
 
         np.savez(
             output_dir / "test_results.npz",
             predictions=all_preds,
             targets=all_targets,
             accuracy=test_acc,
+            auc_roc=test_auc_roc,
         )
-
+        
         # Calculate and plot metrics
         classes = dataloaders["train"].dataset.classes
-        metrics = calculate_and_plot_metrics(
-            all_preds, all_targets, classes, output_dir
-        )
+        metrics = calculate_and_plot_metrics(all_preds, all_targets, classes, output_dir)
+        metrics["auc_roc"] = test_auc_roc  # Add AUC-ROC to the metrics dictionary
+
+        # Save updated metrics
+        with open(output_dir / "metrics.json", "w") as f:
+            json.dump(metrics, f, indent=4)
+
         print(f"Metrics calculated and saved to {output_dir / 'metrics'}")
-        print(
-            f"Overall metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}"
-        )
+        print(f"Overall metrics: Accuracy={metrics['accuracy']:.4f}, F1={metrics['f1_score']:.4f}, AUC-ROC={metrics['auc_roc']:.4f}")
 
         print(f"Training completed. Best validation accuracy: {best_val_acc:.2f}%")
-        print(f"Test accuracy: {test_acc:.2f}%")
+        print(f"Test accuracy: {test_acc:.2f}%, Test AUC-ROC: {test_auc_roc:.4f}")
 
         if writer is not None:
             writer.close()
