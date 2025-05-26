@@ -104,7 +104,7 @@ python scripts/6video_to_jpg.py \
 <!-- <details open id="models">
 <summary style="font-size: 1.5em; font-weight: bold;">The models<hr></summary> -->
 
-![Models](ressources/models.jpg)
+![Models](assets/framework.png)
 
 *Our pipeline, using our models: LIDM, Re-Identification (Privacy), LVDM and VAE*
 
@@ -221,7 +221,7 @@ As the final step, we evaluate the quality of Cardiac-Synthetic videos by traini
 <!-- <details open id="results">
 <summary style="font-size: 1.5em; font-weight: bold;">Results<hr></summary> -->
 
-<p>Here is a side by side comparison between a real and a synthetic video.</p>
+<!-- <p>Here is a side by side comparison between a real and a synthetic video.</p>
 
 <table style="width:auto; border:1px solid black; text-align:center;">
     <tr>
@@ -229,14 +229,14 @@ As the final step, we evaluate the quality of Cardiac-Synthetic videos by traini
         <th style="padding:10px; border:1px solid black;">Reproduction</th>
     </tr>
     <tr>
-        <td style="padding:10px; border:1px solid black;"><img src="ressources/real.gif" alt="Real Video"></td>
-        <td style="padding:10px; border:1px solid black;"><img src="ressources/synt.gif" alt="Reproduction"></td>
+        <td style="padding:10px; border:1px solid black;"><img src="assets/real.gif" alt="Real Video"></td>
+        <td style="padding:10px; border:1px solid black;"><img src="assets/synt.gif" alt="Reproduction"></td>
     </tr>
-</table>
+</table> -->
 
 <p>Here we show a collection of synthetic videos from Cardiac-Synthetic.</p>
 
-![Mosaic](ressources/mosaic.gif)
+![Mosaic](assets/mosaic.gif)
 
 <!-- </details> -->
 
