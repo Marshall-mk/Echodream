@@ -56,11 +56,17 @@ if is_wandb_available():
 # Will error if the minimal version of diffusers is not installed.
 check_min_version("0.22.0.dev0")
 
-logger = get_logger(__name__, __name__, log_level="INFO")
+logger = get_logger(__name__, log_level="INFO")
 
+"""
+python train.py --config path/to/config.yaml --training_mode diffusion --conditioning_type class_id
+CUDA_VISIBLE_DEVICES='0,1,5,6' accelerate launch  --num_processes 4  --multi_gpu   
+--mixed_precision fp16 -m  echo.lvdm.train  --config echo/lvdm/configs/default.yaml 
+--training_mode diffusion --conditioning_type text
+"""
 # Define a simple classifier model
 class VideoClassifier(nn.Module):
-    def __init__(self, in_channels, num_classes=4, hidden_dim=64):
+    def __init__(self, in_channels, num_classes=2, hidden_dim=64):
         super().__init__()
         
         self.conv1 = nn.Conv3d(in_channels, hidden_dim, kernel_size=3, padding=1)
@@ -104,32 +110,31 @@ def tokenize_text(text, tokenizer):
 def compute_validation_metrics(generated_videos, reference_videos):
     """Compute validation metrics between generated and reference videos."""
     metrics = {}
-
+    
     # Calculate SSIM
     ssim_values = []
     for i in range(len(generated_videos)):
         ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
         ssim_values.append(ssim_val)
-    metrics["ssim"] = np.mean(ssim_values)
-
+    metrics['ssim'] = np.mean(ssim_values)
+    
     # Calculate PSNR
     psnr_values = []
     for i in range(len(generated_videos)):
         psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
         psnr_values.append(psnr_val)
-    metrics["psnr"] = np.mean(psnr_values)
-
+    metrics['psnr'] = np.mean(psnr_values)
+    
     # You could add other metrics like FID if you have a pretrained model
-
+    
     return metrics
-
 
 def calculate_ssim(generated_video, reference_video):
     """Calculate SSIM between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-
+    
     # Calculate SSIM for each frame
     ssim_values = []
     for i in range(generated_video.shape[0]):
@@ -137,16 +142,15 @@ def calculate_ssim(generated_video, reference_video):
             generated_video[i], reference_video[i], multichannel=True
         )
         ssim_values.append(ssim_val)
-
+    
     return np.mean(ssim_values)
-
 
 def calculate_psnr(generated_video, reference_video):
     """Calculate PSNR between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-
+    
     # Calculate PSNR for each frame
     psnr_values = []
     for i in range(generated_video.shape[0]):
@@ -156,7 +160,7 @@ def calculate_psnr(generated_video, reference_video):
         else:
             psnr_val = 20 * np.log10(255.0 / np.sqrt(mse))
             psnr_values.append(psnr_val)
-
+    
     return np.mean(psnr_values)
 
 
@@ -199,11 +203,28 @@ def log_validation(
     ref_elements = [val_dataset[i] for i in indices]
     ref_frames = [e["image"] for e in ref_elements]
     ref_videos = [e["video"] for e in ref_elements]
-    ref_frames = torch.stack(ref_frames, dim=0)
-    ref_frames = ref_frames.to(accelerator.device, weight_dtype)
-    ref_frames = ref_frames[:, :, None, :, :].repeat(
-        1, 1, config.validation_frames, 1, 1
-    )
+    
+    # Extract 3 reference frames at indices 0, 32, 63
+    ref_frames_multi = []
+    for e in ref_elements:
+        video = e["video"]  # C x T x H x W
+        ref_0 = video[:, 0, :, :]  # Frame at index 0
+        ref_32 = video[:, min(32, video.shape[1]-1), :, :]  # Frame at index 32 (or last frame if shorter)
+        ref_63 = video[:, min(63, video.shape[1]-1), :, :]  # Frame at index 63 (or last frame if shorter)
+        ref_frames_multi.append(torch.stack([ref_0, ref_32, ref_63], dim=1))  # C x 3 x H x W
+    
+    ref_frames_multi = torch.stack(ref_frames_multi, dim=0)  # B x C x 3 x H x W
+    ref_frames_multi = ref_frames_multi.to(accelerator.device, weight_dtype)
+    
+    # Create reference frames for the entire temporal sequence
+    B, C, _, H, W = ref_frames_multi.shape
+    T = config.validation_frames
+    ref_frames_expanded = torch.zeros(B, C, T, H, W, device=accelerator.device, dtype=weight_dtype)
+    
+    # Apply reference frames to different temporal segments
+    ref_frames_expanded[:, :, :21, :, :] = ref_frames_multi[:, :, 0:1, :, :].repeat(1, 1, 21, 1, 1)  # 0th frame for indices 0-20
+    ref_frames_expanded[:, :, 21:43, :, :] = ref_frames_multi[:, :, 1:2, :, :].repeat(1, 1, 22, 1, 1)  # 32nd frame for indices 21-42
+    ref_frames_expanded[:, :, 43:, :, :] = ref_frames_multi[:, :, 2:3, :, :].repeat(1, 1, T-43, 1, 1)  # 63rd frame for indices 43-end
 
     # Get class labels if available
     if "class_id" in ref_elements[0]:
@@ -226,7 +247,7 @@ def log_validation(
             [e["lvef"] for e in ref_elements],
             device=accelerator.device,
             dtype=weight_dtype,
-        )
+        )           
     elif conditioning_type == "view":
         conditioning = torch.tensor(
             [e["view"] for e in ref_elements],
@@ -292,7 +313,7 @@ def log_validation(
         # Set up for guidance if needed
         if hasattr(config, "validation_guidance") and config.validation_guidance > 1.0:
             conditioning = torch.cat([conditioning] * 2)
-            ref_frames = torch.cat([ref_frames] * 2)
+            ref_frames_expanded = torch.cat([ref_frames_expanded] * 2)
 
         # Sampling loop
         if config.training_mode == "diffusion":
@@ -307,7 +328,7 @@ def log_validation(
                 latent_model_input = scheduler.scale_model_input(
                     latent_model_input, timestep=t
                 )
-                latent_model_input = torch.cat((latent_model_input, ref_frames), dim=1)
+                latent_model_input = torch.cat((latent_model_input, ref_frames_expanded), dim=1)
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
                 forward_kwargs = {"timestep": t, "encoder_hidden_states": conditioning}
@@ -343,7 +364,7 @@ def log_validation(
             for i in range(len(t_steps) - 1):
                 t = t_steps[i]
                 t_tensor = t.repeat(B)
-                latent_model_input = torch.cat((latents, ref_frames), dim=1)
+                latent_model_input = torch.cat((latents, ref_frames_expanded), dim=1)
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
                 forward_kwargs = {
@@ -354,7 +375,7 @@ def log_validation(
                     dummy_added_time_ids = torch.zeros(
                         (B, config.unet.addition_time_embed_dim),
                         device=accelerator.device,
-                        dtype=weight_dtype,
+                        dtype=weight_dtype, 
                     )
                     forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
@@ -364,21 +385,21 @@ def log_validation(
                 # Euler step
                 latents = latents - velocity_pred * dt
 
-    # VAE decoding and classifier evaluation
+    # VAE decoding (simplified)
     with torch.no_grad():
         if val_vae.__class__.__name__ == "AutoencoderKL":
             latents = rearrange(latents, "b c t h w -> (b t) c h w")
-        latents_for_classifier = latents.detach().clone()
         latents = latents / val_vae.config.scaling_factor
         videos = val_vae.decode(latents.float()).sample
         videos = (videos + 1) * 128
         videos = videos.clamp(0, 255).to(torch.uint8).cpu()
         if val_vae.__class__.__name__ == "AutoencoderKL":
             videos = rearrange(videos, "(b t) c h w -> b c t h w", b=B)
-        
         # Evaluate classifier if available
         metrics = {}
         if val_classifier is not None and class_labels is not None:
+            # Use the final latents for classifier evaluation
+            latents_for_classifier = latents.detach().clone()
             if val_vae.__class__.__name__ == "AutoencoderKL":
                 # Reshape back for classifier
                 latents_for_classifier = rearrange(latents_for_classifier, "(b t) c h w -> b c t h w", b=B)
@@ -386,8 +407,8 @@ def log_validation(
             logits = val_classifier(latents_for_classifier.float())
             acc = compute_accuracy(logits, class_labels)
             metrics["val_accuracy"] = acc.item()
-        
-        ref_frames = ref_frames[:, :, 0, :, :]  # B x C x H x W
+
+        ref_frames = ref_frames_multi[:, :, 0, :, :]  # Use first reference frame for display
         ref_frames = ref_frames / val_vae.config.scaling_factor
         ref_frames = val_vae.decode(ref_frames.float()).sample
         ref_frames = (ref_frames + 1) * 128  # [-1, 1] -> [0, 256]
@@ -412,7 +433,7 @@ def log_validation(
             metrics.update(visual_metrics)
         except Exception as e:
             logger.error(f"Error computing validation metrics: {e}")
-        
+            metrics = {}
         videos = torch.cat(
             [ref_frames, ref_videos, videos], dim=3
         )  # B x C x T x (3 H) x W // vertical concat
@@ -510,7 +531,7 @@ def train(
     )
 
     # Create a classifier model (new addition)
-    num_classes = config.get("num_classes", 4)
+    num_classes = config.get("num_classes", 2)
     classifier = VideoClassifier(in_channels=4, num_classes=num_classes, hidden_dim=64)
 
     # Set up format functions based on model type
@@ -842,14 +863,29 @@ def train(
         train_cls_loss = 0.0
         train_loop_loss = 0.0
         train_accuracy = 0.0
-        
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 # Get batch data
                 latents = batch["video"]  # B x C x T x H x W
-                ref_frame = batch["image"]  # B x C x H x W
+                # ref_frame = batch["image"]  # B x C x H x W  # Remove old single ref frame
                 padding_indices = batch["padding"]  # B
+
+                # Extract 3 reference frames at indices 0, 32, 63 from the video
+                B, C, T, H, W = latents.shape
+                ref_0 = latents[:, :, 0, :, :]  # Frame at index 0
+                ref_32 = latents[:, :, torch.clamp(torch.tensor(32), 0, T-1), :, :]  # Frame at index 32
+                ref_63 = latents[:, :, torch.clamp(torch.tensor(63), 0, T-1), :, :]  # Frame at index 63
                 
+                # Create reference frames for the entire temporal sequence
+                ref_frame_expanded = torch.zeros_like(latents)  # B x C x T x H x W
+                
+                # Apply reference frames to different temporal segments
+                ref_frame_expanded[:, :, :21, :, :] = ref_0.unsqueeze(2).repeat(1, 1, min(21, T), 1, 1)  # 0th frame for indices 0-20
+                if T > 21:
+                    ref_frame_expanded[:, :, 21:43, :, :] = ref_32.unsqueeze(2).repeat(1, 1, min(22, T-21), 1, 1)  # 32nd frame for indices 21-42
+                if T > 43:
+                    ref_frame_expanded[:, :, 43:, :, :] = ref_63.unsqueeze(2).repeat(1, 1, T-43, 1, 1)  # 63rd frame for indices 43-end
+
                 # Get class labels if available for classifier
                 if "class_id" in batch:
                     class_labels = batch["class_id"].to(accelerator.device)
@@ -870,14 +906,14 @@ def train(
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
 
-                    # Add a seed reset before processing text through CLIP to avoid
+                    # Add a seed reset before processing text through CLIP to avoid 
                     # potential RNG state corruption across processes
                     if torch.distributed.is_initialized():
                         # Manually reset seed to avoid mt19937 state corruption
                         torch.manual_seed(1000 + global_step)
                         if torch.cuda.is_available():
                             torch.cuda.manual_seed_all(1000 + global_step)
-
+                    
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
@@ -917,7 +953,7 @@ def train(
                 conditioning = conditioning * conditioning_mask
 
                 # Replicate reference frame across time dimension
-                ref_frame = ref_frame[:, :, None, :, :].repeat(1, 1, T, 1, 1)
+                # ref_frame_expanded = ref_frame_expanded[:, :, None, :, :].repeat(1, 1, T, 1, 1)
 
                 # Sample timesteps
                 timesteps = torch.randint(
@@ -958,7 +994,7 @@ def train(
                     noisy_latents = (1 - t) * latents + t * noise
 
                 # Prepare model inputs
-                model_input = torch.cat((noisy_latents, ref_frame), dim=1)
+                model_input = torch.cat((noisy_latents, ref_frame_expanded), dim=1)
                 model_input, padding = format_input(model_input, mult=3)
                 # Forward pass
                 forward_kwargs = {
@@ -993,7 +1029,7 @@ def train(
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
                 denoise_loss = denoise_loss * mask
                 denoise_loss = denoise_loss.mean()
-                
+
                 # NEW: Compute predicted clean latents for classifier
                 if training_mode == "diffusion":
                     if scheduler.config.prediction_type == "epsilon":
@@ -1013,25 +1049,43 @@ def train(
                 accuracy = torch.tensor(0.0, device=accelerator.device)
                 
                 if class_labels is not None:
-                    # Move pred_latents to CPU and float32 for VAE processing
-                    pred_latents_cpu = pred_latents.detach().float().cpu()
-                    # Decode to images
+                    # Keep pred_latents on device for VAE processing
+                    pred_latents_for_decode = pred_latents.detach().to(dtype=weight_dtype)
+                    
+                    # Handle different VAE types
+                    if vae.__class__.__name__ == "AutoencoderKL":
+                        # Reshape for 2D VAE
+                        pred_latents_reshaped = rearrange(pred_latents_for_decode, "b c t h w -> (b t) c h w")
+                    else:
+                        pred_latents_reshaped = pred_latents_for_decode
+                    
+                    # Decode to images (keep on device)
                     with torch.no_grad():
-                        pred_decoded = vae.decode(pred_latents_cpu / vae.config.scaling_factor).sample
-                        # Move back to device for classifier
-                        pred_decoded = pred_decoded.to(accelerator.device)
+                        pred_decoded = vae.decode(pred_latents_reshaped / vae.config.scaling_factor).sample
+                        
+                        # Reshape back if needed
+                        if vae.__class__.__name__ == "AutoencoderKL":
+                            pred_decoded = rearrange(pred_decoded, "(b t) c h w -> b c t h w", b=B)
                 
-                    # Pass through classifier
-                    logits = classifier(pred_latents.float())  # Use the predicted latents directly
-                    cls_loss = classification_loss(logits, class_labels)
-                    accuracy = compute_accuracy(logits, class_labels)
+                    # Pass through classifier - use original predicted latents
+                    logits = classifier(pred_latents.float())
+                    cls_loss = classification_loss(logits, class_labels).float()
+                    accuracy = compute_accuracy(logits, class_labels).float()
                     
                     # Loop consistency: re-encode decoded images
                     with torch.no_grad():
-                        reencoded = vae.encode(pred_decoded).latent_dist.sample()
-                        reencoded = reencoded.to(accelerator.device) * vae.config.scaling_factor
+                        if vae.__class__.__name__ == "AutoencoderKL":
+                            pred_decoded_flat = rearrange(pred_decoded, "b c t h w -> (b t) c h w")
+                        else:
+                            pred_decoded_flat = pred_decoded
+                        
+                        reencoded = vae.encode(pred_decoded_flat).latent_dist.sample()
+                        reencoded = reencoded * vae.config.scaling_factor
+                        
+                        if vae.__class__.__name__ == "AutoencoderKL":
+                            reencoded = rearrange(reencoded, "(b t) c h w -> b c t h w", b=B)
                     
-                    loop_loss = loop_consistency_loss(reencoded, pred_latents.float())
+                    loop_loss = loop_consistency_loss(reencoded, pred_latents.float()).float()
 
                 # Total loss
                 loss = denoise_loss + cls_loss_weight * cls_loss + loop_loss_weight * loop_loss
@@ -1218,7 +1272,6 @@ def train(
 
     accelerator.end_training()
 
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train a diffusion or flow matching model with different conditioning options"
@@ -1255,7 +1308,7 @@ def parse_args():
     parser.add_argument(
         "--num_classes", 
         type=int, 
-        default=4, 
+        default=2, 
         help="Number of classes for classifier"
     )
     return parser.parse_args()
@@ -1272,7 +1325,8 @@ if __name__ == "__main__":
     config.cls_loss_weight = args.cls_loss_weight
     config.loop_loss_weight = args.loop_loss_weight
     config.num_classes = args.num_classes
-
+    config.mixed_precision = args.mixed_precision if hasattr(args, "mixed_precision") else "no"
+    
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (
         not hasattr(config, "text_encoder_path")
