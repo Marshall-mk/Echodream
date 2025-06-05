@@ -543,10 +543,10 @@ class EchoPediatric(EchoDynamic):
 
     def __getitem__(self, idx):
         output, row = super().__getitem__(idx, return_row=True)
-        if "view" in self.outputs:
+        if "view" in output:
             output["view"] = row["View"]
 
-        if "text" in self.outputs:
+        if "text" in output:
             # Include view in text if available
             ef_text = self.text_template.format(int(row["EF"]))
             if "View" in row:
@@ -692,6 +692,18 @@ class CardiacNet(EchoDynamic):
 
     def __getitem__(self, idx):
         output, row = super().__getitem__(idx, return_row=True)
+
+        # Initialize video reader if any video-based output is needed
+        reader = None
+        if "key_frames" in self.outputs or "image" in self.outputs:
+            reader = decord.VideoReader(
+                row["VideoPath"],
+                ctx=decord.cpu(),
+                width=self.resolution,
+                height=self.resolution,
+            )
+            og_frame_count = len(reader)
+
         if "class_id" in self.outputs:
             output["class_id"] = row["class_id"]
 
@@ -699,6 +711,51 @@ class CardiacNet(EchoDynamic):
             output["text"] = self.text_template.format(
                 self.class_name_mapping[row["class_id"]]
             )
+
+        if "key_frames" in self.outputs:
+            key_frame_columns = ["Start_ED", "ES", "End_ED"]
+            key_frames = []
+
+            for col in key_frame_columns:
+                if col in row and pd.notna(row[col]):
+                    frame_idx = int(row[col])
+                    # Ensure frame index is within bounds
+                    if 0 <= frame_idx < og_frame_count:
+                        frame = reader.get_batch([frame_idx])[0]  # H x W x C, uint8
+                        frame = frame.float() / 128.0 - 1  # normalize to [-1, 1]
+                        frame = frame.permute(2, 0, 1)  # H x W x C -> C x H x W
+                        key_frames.append(frame)
+                    else:
+                        # Use first frame as fallback if index is out of bounds
+                        frame = reader.get_batch([0])[0]
+                        frame = frame.float() / 128.0 - 1
+                        frame = frame.permute(2, 0, 1)
+                        key_frames.append(frame)
+                else:
+                    # Use first frame as fallback if column is missing or NaN
+                    frame = reader.get_batch([0])[0]
+                    frame = frame.float() / 128.0 - 1
+                    frame = frame.permute(2, 0, 1)
+                    key_frames.append(frame)
+
+            if key_frames:
+                # Stack key frames channel-wise: (3 frames x C x H x W) -> (3*C x H x W)
+                output["key_frames"] = torch.cat(key_frames, dim=0)
+            else:
+                # Fallback: use first frame repeated 3 times
+                first_frame = reader.get_batch([0])[0]
+                first_frame = first_frame.float() / 128.0 - 1
+                first_frame = first_frame.permute(2, 0, 1)
+                output["key_frames"] = torch.cat([first_frame] * 3, dim=0)
+
+        # Handle image output separately to avoid conflicts
+        if "image" in self.outputs and reader is not None:
+            image = reader.get_batch(np.random.randint(0, og_frame_count, 1))[
+                0
+            ]  # H x W x C, uint8
+            image = image.float() / 128.0 - 1
+            image = image.permute(2, 0, 1)  # H x W x C -> C x H x W
+            output["image"] = self.transform(image)
 
         return output
 
@@ -731,7 +788,11 @@ class CardiacNetLatent(EchoDynamic):
             "filename": row["FileName"],
         }
 
-        if "image" in self.outputs or "video" in self.outputs:
+        if (
+            "image" in self.outputs
+            or "video" in self.outputs
+            or "key_frames" in self.outputs
+        ):
             latent_file = row["VideoPath"]
             latent_video_tensor = torch.load(latent_file)  # T x C x H x W
             og_fps = row["FPS"]
@@ -794,9 +855,17 @@ class CardiacNetLatent(EchoDynamic):
             output["fps"] = target_fps
             output["padding"] = p_index
 
+        if "class_id" in self.outputs:
+            output["class_id"] = row["class_id"]
+
         if "lvef" in self.outputs:
             lvef = row["EF"] / 100.0
             output["lvef"] = torch.tensor(lvef, dtype=torch.float32)
+
+        if "text" in self.outputs:
+            output["text"] = self.text_template.format(
+                self.class_name_mapping[row["class_id"]]
+            )
 
         if "image" in self.outputs:
             latent_image_tensor = latent_video_tensor[
@@ -804,13 +873,30 @@ class CardiacNetLatent(EchoDynamic):
             ][0]  # C x H x W
             output["image"] = self.transform(latent_image_tensor)
 
-        if "class_id" in self.outputs:
-            output["class_id"] = row["class_id"]
+        if "key_frames" in self.outputs:
+            key_frame_columns = ["Start_ED", "ES", "End_ED"]
+            key_frames = []
 
-        if "text" in self.outputs and "class_id" in row:
-            output["text"] = self.text_template.format(
-                self.class_name_mapping[row["class_id"]]
-            )
+            for col in key_frame_columns:
+                if col in row and pd.notna(row[col]):
+                    frame_idx = int(row[col])
+                    # Ensure frame index is within bounds
+                    if 0 <= frame_idx < og_frame_count:
+                        key_frames.append(latent_video_tensor[frame_idx])  # C x H x W
+                    else:
+                        # Use first frame as fallback if index is out of bounds
+                        key_frames.append(latent_video_tensor[0])
+                else:
+                    # Use first frame as fallback if column is missing or NaN
+                    key_frames.append(latent_video_tensor[0])
+
+            if key_frames:
+                # Stack key frames channel-wise: (3 frames x C x H x W) -> (3*C x H x W)
+                output["key_frames"] = torch.cat(key_frames, dim=0)
+            else:
+                # Fallback: use first frame repeated 3 times
+                first_frame = latent_video_tensor[0]
+                output["key_frames"] = torch.cat([first_frame] * 3, dim=0)
 
         if return_row:
             return output, row
@@ -1267,17 +1353,23 @@ class TensorSetv3(Dataset):
 
         # Filter tensors based on metadata and add appropriate extensions
         self.all_tensors = []
+        self.cond_values = []
         for _, row in self.metadata.iterrows():
             file_path = os.path.join(root, row["FileName"] + ext)
             if os.path.exists(file_path):
                 self.all_tensors.append(file_path)
+                self.cond_values.append(row["class_id"])
 
     def __len__(self):
         return len(self.all_tensors)
 
     def __getitem__(self, idx):
         tensor = torch.load(self.all_tensors[idx], map_location="cpu")
-        return tensor[: self.num_frames]
+        cond_value = self.cond_values[idx]
+        # return tensor[: self.num_frames]
+        return tensor[
+            : self.num_frames
+        ], cond_value  # Return only the first num_frames of the tensor
 
 
 class TensorSetv4(Dataset):

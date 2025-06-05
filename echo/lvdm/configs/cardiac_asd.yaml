@@ -1,12 +1,12 @@
-wandb_group: "lvdm_cardiac_asd"
-output_dir: /nfs/usrhome/khmuhammad/EchoPath/experiments/cardiac_asd
+wandb_group: "lvdm_cardiac_asd_with_triplets"
+output_dir: /nfs/usrhome/khmuhammad/EchoPath/experiments/lvdm_cardiac_asd_with_triplets
 
 vae_path: /nfs/usrhome/khmuhammad/EchoPath/models/vae
 
 globals:
     target_fps: 32
     target_nframes: 64
-    outputs: ["video", "class_id", "image"] #, "class_id"
+    outputs: ["video", "class_id", "image", "key_frames"] #, "class_id"
 
 datasets:
     - name: CardiacNetLatent

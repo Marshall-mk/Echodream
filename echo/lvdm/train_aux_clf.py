@@ -58,18 +58,19 @@ check_min_version("0.22.0.dev0")
 
 logger = get_logger(__name__, __name__, log_level="INFO")
 
+
 # Define a simple classifier model
 class VideoClassifier(nn.Module):
     def __init__(self, in_channels, num_classes=2, hidden_dim=64):
         super().__init__()
-        
+
         self.conv1 = nn.Conv3d(in_channels, hidden_dim, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm3d(hidden_dim)
-        self.conv2 = nn.Conv3d(hidden_dim, hidden_dim*2, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm3d(hidden_dim*2)
+        self.conv2 = nn.Conv3d(hidden_dim, hidden_dim * 2, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm3d(hidden_dim * 2)
         self.pool = nn.AdaptiveAvgPool3d((1, 1, 1))
-        self.fc = nn.Linear(hidden_dim*2, num_classes)
-        
+        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+
     def forward(self, x):
         # x shape: [B, C, T, H, W]
         x = F.relu(self.bn1(self.conv1(x)))
@@ -78,16 +79,20 @@ class VideoClassifier(nn.Module):
         x = self.fc(x)
         return x
 
+
 # Loss functions
 def classification_loss(logits, labels):
     return F.cross_entropy(logits, labels)
+
 
 def compute_accuracy(logits, labels):
     preds = torch.argmax(logits, dim=1)
     return (preds == labels).float().mean()
 
+
 def loop_consistency_loss(reencoded, pred_latents):
     return F.mse_loss(reencoded, pred_latents)
+
 
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
@@ -375,18 +380,20 @@ def log_validation(
         videos = videos.clamp(0, 255).to(torch.uint8).cpu()
         if val_vae.__class__.__name__ == "AutoencoderKL":
             videos = rearrange(videos, "(b t) c h w -> b c t h w", b=B)
-        
+
         # Evaluate classifier if available
         metrics = {}
         if val_classifier is not None and class_labels is not None:
             if val_vae.__class__.__name__ == "AutoencoderKL":
                 # Reshape back for classifier
-                latents_for_classifier = rearrange(latents_for_classifier, "(b t) c h w -> b c t h w", b=B)
+                latents_for_classifier = rearrange(
+                    latents_for_classifier, "(b t) c h w -> b c t h w", b=B
+                )
             # Get predictions
             logits = val_classifier(latents_for_classifier.float())
             acc = compute_accuracy(logits, class_labels)
             metrics["val_accuracy"] = acc.item()
-        
+
         ref_frames = ref_frames[:, :, 0, :, :]  # B x C x H x W
         ref_frames = ref_frames / val_vae.config.scaling_factor
         ref_frames = val_vae.decode(ref_frames.float()).sample
@@ -412,7 +419,7 @@ def log_validation(
             metrics.update(visual_metrics)
         except Exception as e:
             logger.error(f"Error computing validation metrics: {e}")
-        
+
         videos = torch.cat(
             [ref_frames, ref_videos, videos], dim=3
         )  # B x C x T x (3 H) x W // vertical concat
@@ -546,11 +553,11 @@ def train(
             ema_unet.parameters(), model_cls=unet_klass, model_config=ema_unet.config
         )
         # Create EMA for classifier
-        ema_classifier = VideoClassifier(in_channels=4, num_classes=num_classes, hidden_dim=64)
+        ema_classifier = VideoClassifier(
+            in_channels=4, num_classes=num_classes, hidden_dim=64
+        )
         ema_classifier = EMAModel(
-            ema_classifier.parameters(),
-            model_cls=VideoClassifier,
-            model_config=None
+            ema_classifier.parameters(), model_cls=VideoClassifier, model_config=None
         )
         # Create EMA for text encoder if it's being trained
         if config.train_text_encoder:
@@ -573,7 +580,7 @@ def train(
                     # Save classifier EMA
                     torch.save(
                         accelerator.unwrap_model(ema_classifier).state_dict(),
-                        os.path.join(output_dir, "classifier_ema.pt")
+                        os.path.join(output_dir, "classifier_ema.pt"),
                     )
 
                 for i, model in enumerate(models):
@@ -584,7 +591,7 @@ def train(
                     elif i == 1:  # Second model is classifier
                         torch.save(
                             model.state_dict(),
-                            os.path.join(output_dir, "classifier.pt")
+                            os.path.join(output_dir, "classifier.pt"),
                         )
                     # Save text encoder if it's being trained
                     elif (
@@ -600,15 +607,15 @@ def train(
                 )
                 ema_unet.load_state_dict(load_model.state_dict())
                 ema_unet.to(accelerator.device)
-                
+
                 # Load classifier EMA if it exists
                 if os.path.exists(os.path.join(input_dir, "classifier_ema.pt")):
                     ema_classifier_state = torch.load(
                         os.path.join(input_dir, "classifier_ema.pt"),
-                        map_location=accelerator.device
+                        map_location=accelerator.device,
                     )
                     ema_classifier.load_state_dict(ema_classifier_state)
-                
+
                 del load_model
 
             for i in range(len(models)):
@@ -628,12 +635,14 @@ def train(
                         model.load_state_dict(
                             torch.load(
                                 os.path.join(input_dir, "classifier.pt"),
-                                map_location=accelerator.device
+                                map_location=accelerator.device,
                             )
                         )
                 else:
                     # Load UNet
-                    load_model = unet_klass.from_pretrained(os.path.join(input_dir, "unet"))
+                    load_model = unet_klass.from_pretrained(
+                        os.path.join(input_dir, "unet")
+                    )
                     model.register_to_config(**load_model.config)
                     model.load_state_dict(load_model.state_dict())
                     del load_model
@@ -655,7 +664,7 @@ def train(
     params_to_optimize = list(unet.parameters()) + list(classifier.parameters())
     if config.train_text_encoder:
         params_to_optimize += list(text_encoder.parameters())
-    
+
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=config.learning_rate,
@@ -697,13 +706,13 @@ def train(
     models_to_prepare = [unet, classifier]
     if config.train_text_encoder:
         models_to_prepare.append(text_encoder)
-    
+
     models_to_prepare.extend([optimizer, train_dataloader, lr_scheduler])
     prepared_objects = accelerator.prepare(*models_to_prepare)
-    
+
     unet = prepared_objects[0]
     classifier = prepared_objects[1]
-    
+
     if config.train_text_encoder:
         text_encoder = prepared_objects[2]
         optimizer, train_dataloader, lr_scheduler = prepared_objects[3:]
@@ -750,10 +759,9 @@ def train(
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = OmegaConf.to_container(config, resolve=True)
-        tracker_config.update({
-            "cls_loss_weight": cls_loss_weight,
-            "loop_loss_weight": loop_loss_weight
-        })
+        tracker_config.update(
+            {"cls_loss_weight": cls_loss_weight, "loop_loss_weight": loop_loss_weight}
+        )
         accelerator.init_trackers(
             config.tracker_project_name,
             tracker_config,
@@ -789,9 +797,7 @@ def train(
     logger.info(
         f"  U-Net: Total params = {model_num_params} \t Trainable params = {model_trainable_params} ({model_trainable_params / model_num_params * 100:.2f}%)"
     )
-    logger.info(
-        f"  Classifier: Total params = {cls_num_params}"
-    )
+    logger.info(f"  Classifier: Total params = {cls_num_params}")
     logger.info(f"  Classification loss weight = {cls_loss_weight}")
     logger.info(f"  Loop consistency loss weight = {loop_loss_weight}")
 
@@ -842,14 +848,14 @@ def train(
         train_cls_loss = 0.0
         train_loop_loss = 0.0
         train_accuracy = 0.0
-        
+
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 # Get batch data
                 latents = batch["video"]  # B x C x T x H x W
                 ref_frame = batch["image"]  # B x C x H x W
                 padding_indices = batch["padding"]  # B
-                
+
                 # Get class labels if available for classifier
                 if "class_id" in batch:
                     class_labels = batch["class_id"].to(accelerator.device)
@@ -990,10 +996,12 @@ def train(
                     target = latents - noise
 
                 # Compute denoising loss with masking
-                denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                denoise_loss = F.mse_loss(
+                    model_pred.float(), target.float(), reduction="none"
+                )
                 denoise_loss = denoise_loss * mask
                 denoise_loss = denoise_loss.mean()
-                
+
                 # NEW: Compute predicted clean latents for classifier
                 if training_mode == "diffusion":
                     if scheduler.config.prediction_type == "epsilon":
@@ -1001,78 +1009,106 @@ def train(
                         alpha_t = scheduler._get_alpha_prod(timesteps)
                         alpha_t = alpha_t.view(-1, 1, 1, 1, 1)
                         sqrt_one_minus_at = torch.sqrt(1 - alpha_t)
-                        pred_latents = (noisy_latents - sqrt_one_minus_at * model_pred) / torch.sqrt(alpha_t)
+                        pred_latents = (
+                            noisy_latents - sqrt_one_minus_at * model_pred
+                        ) / torch.sqrt(alpha_t)
                     else:
                         pred_latents = model_pred
                 else:  # flow_matching
                     pred_latents = latents
-                
+
                 # Pass through classifier
                 cls_loss = torch.tensor(0.0, device=accelerator.device)
                 loop_loss = torch.tensor(0.0, device=accelerator.device)
                 accuracy = torch.tensor(0.0, device=accelerator.device)
-                
+
                 if class_labels is not None:
                     # Keep pred_latents on device for VAE processing
-                    pred_latents_for_decode = pred_latents.detach().to(dtype=weight_dtype)
-                    
+                    pred_latents_for_decode = pred_latents.detach().to(
+                        dtype=weight_dtype
+                    )
+
                     # Handle different VAE types
                     if vae.__class__.__name__ == "AutoencoderKL":
                         # Reshape for 2D VAE
-                        pred_latents_reshaped = rearrange(pred_latents_for_decode, "b c t h w -> (b t) c h w")
+                        pred_latents_reshaped = rearrange(
+                            pred_latents_for_decode, "b c t h w -> (b t) c h w"
+                        )
                     else:
                         pred_latents_reshaped = pred_latents_for_decode
-                    
+
                     # Decode to images (keep on device)
                     with torch.no_grad():
-                        pred_decoded = vae.decode(pred_latents_reshaped / vae.config.scaling_factor).sample
-                        
+                        pred_decoded = vae.decode(
+                            pred_latents_reshaped / vae.config.scaling_factor
+                        ).sample
+
                         # Reshape back if needed
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            pred_decoded = rearrange(pred_decoded, "(b t) c h w -> b c t h w", b=B)
-                
+                            pred_decoded = rearrange(
+                                pred_decoded, "(b t) c h w -> b c t h w", b=B
+                            )
+
                     # Pass through classifier - use original predicted latents
                     logits = classifier(pred_latents.float())
                     cls_loss = classification_loss(logits, class_labels).float()
                     accuracy = compute_accuracy(logits, class_labels).float()
-                    
+
                     # Loop consistency: re-encode decoded images
                     with torch.no_grad():
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            pred_decoded_flat = rearrange(pred_decoded, "b c t h w -> (b t) c h w")
+                            pred_decoded_flat = rearrange(
+                                pred_decoded, "b c t h w -> (b t) c h w"
+                            )
                         else:
                             pred_decoded_flat = pred_decoded
-                        
+
                         reencoded = vae.encode(pred_decoded_flat).latent_dist.sample()
                         reencoded = reencoded * vae.config.scaling_factor
-                        
+
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            reencoded = rearrange(reencoded, "(b t) c h w -> b c t h w", b=B)
-                    
-                    loop_loss = loop_consistency_loss(reencoded, pred_latents.float()).float()
+                            reencoded = rearrange(
+                                reencoded, "(b t) c h w -> b c t h w", b=B
+                            )
+
+                    loop_loss = loop_consistency_loss(
+                        reencoded, pred_latents.float()
+                    ).float()
 
                 # Total loss
-                loss = denoise_loss + cls_loss_weight * cls_loss + loop_loss_weight * loop_loss
+                loss = (
+                    denoise_loss
+                    + cls_loss_weight * cls_loss
+                    + loop_loss_weight * loop_loss
+                )
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(
                     loss.repeat(config.train_batch_size)
                 ).mean()
                 train_loss += avg_loss.item() / config.gradient_accumulation_steps
-                
+
                 # Track component losses
-                train_denoise_loss += denoise_loss.item() / config.gradient_accumulation_steps
+                train_denoise_loss += (
+                    denoise_loss.item() / config.gradient_accumulation_steps
+                )
                 if class_labels is not None:
-                    train_cls_loss += cls_loss.item() / config.gradient_accumulation_steps
-                    train_loop_loss += loop_loss.item() / config.gradient_accumulation_steps
-                    train_accuracy += accuracy.item() / config.gradient_accumulation_steps
+                    train_cls_loss += (
+                        cls_loss.item() / config.gradient_accumulation_steps
+                    )
+                    train_loop_loss += (
+                        loop_loss.item() / config.gradient_accumulation_steps
+                    )
+                    train_accuracy += (
+                        accuracy.item() / config.gradient_accumulation_steps
+                    )
 
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(
-                        list(unet.parameters()) + list(classifier.parameters()), 
-                        config.max_grad_norm
+                        list(unet.parameters()) + list(classifier.parameters()),
+                        config.max_grad_norm,
                     )
                 optimizer.step()
                 lr_scheduler.step()
@@ -1205,7 +1241,7 @@ def train(
         # Create the pipeline using the trained modules
         unet = accelerator.unwrap_model(unet)
         classifier = accelerator.unwrap_model(classifier)
-        
+
         if config.use_ema:
             ema_unet.copy_to(unet.parameters())
             ema_classifier.copy_to(classifier.parameters())
@@ -1226,9 +1262,11 @@ def train(
 
         # Always save the UNet
         unet.save_pretrained(os.path.join(config.output_dir, "unet"))
-        
+
         # Save the classifier
-        torch.save(classifier.state_dict(), os.path.join(config.output_dir, "classifier.pt"))
+        torch.save(
+            classifier.state_dict(), os.path.join(config.output_dir, "classifier.pt")
+        )
 
         # Save the config
         OmegaConf.save(config, os.path.join(config.output_dir, "config.yaml"))
@@ -1259,22 +1297,19 @@ def parse_args():
         help="Type of conditioning to use",
     )
     parser.add_argument(
-        "--cls_loss_weight", 
-        type=float, 
-        default=1.0, 
-        help="Weight for classification loss"
+        "--cls_loss_weight",
+        type=float,
+        default=1.0,
+        help="Weight for classification loss",
     )
     parser.add_argument(
-        "--loop_loss_weight", 
-        type=float, 
-        default=0.5, 
-        help="Weight for loop consistency loss"
+        "--loop_loss_weight",
+        type=float,
+        default=0.5,
+        help="Weight for loop consistency loss",
     )
     parser.add_argument(
-        "--num_classes", 
-        type=int, 
-        default=2, 
-        help="Number of classes for classifier"
+        "--num_classes", type=int, default=2, help="Number of classes for classifier"
     )
     return parser.parse_args()
 
@@ -1290,7 +1325,9 @@ if __name__ == "__main__":
     config.cls_loss_weight = args.cls_loss_weight
     config.loop_loss_weight = args.loop_loss_weight
     config.num_classes = args.num_classes
-    config.mixed_precision = args.mixed_precision if hasattr(args, "mixed_precision") else "no"
+    config.mixed_precision = (
+        args.mixed_precision if hasattr(args, "mixed_precision") else "no"
+    )
 
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (

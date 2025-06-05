@@ -6,7 +6,7 @@ vae_path: /nfs/usrhome/khmuhammad/EchoPath/models/vae
 globals:
     target_fps: 32
     target_nframes: 64
-    outputs: ["video", "class_id", "image"] #, "class_id"
+    outputs: ["video", "class_id", "image", "key_frames"] #, "class_id"
 
 datasets:
     - name: CardiacNetLatent

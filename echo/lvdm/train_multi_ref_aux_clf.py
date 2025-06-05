@@ -58,24 +58,25 @@ check_min_version("0.22.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-"""
-python train.py --config path/to/config.yaml --training_mode diffusion --conditioning_type class_id
+"""Example command to run this script:
 CUDA_VISIBLE_DEVICES='0,1,5,6' accelerate launch  --num_processes 4  --multi_gpu   
---mixed_precision fp16 -m  echo.lvdm.train  --config echo/lvdm/configs/default.yaml 
---training_mode diffusion --conditioning_type text
+--mixed_precision fp16 -m  echo.lvdm.train_multi_ref_aux_clf  --config echo/lvdm/configs/cardiac_asd.yaml 
+--training_mode diffusion --conditioning_type class_id
 """
+
+
 # Define a simple classifier model
 class VideoClassifier(nn.Module):
     def __init__(self, in_channels, num_classes=2, hidden_dim=64):
         super().__init__()
-        
+
         self.conv1 = nn.Conv3d(in_channels, hidden_dim, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm3d(hidden_dim)
-        self.conv2 = nn.Conv3d(hidden_dim, hidden_dim*2, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm3d(hidden_dim*2)
+        self.conv2 = nn.Conv3d(hidden_dim, hidden_dim * 2, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm3d(hidden_dim * 2)
         self.pool = nn.AdaptiveAvgPool3d((1, 1, 1))
-        self.fc = nn.Linear(hidden_dim*2, num_classes)
-        
+        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+
     def forward(self, x):
         # x shape: [B, C, T, H, W]
         x = F.relu(self.bn1(self.conv1(x)))
@@ -84,16 +85,20 @@ class VideoClassifier(nn.Module):
         x = self.fc(x)
         return x
 
+
 # Loss functions
 def classification_loss(logits, labels):
     return F.cross_entropy(logits, labels)
+
 
 def compute_accuracy(logits, labels):
     preds = torch.argmax(logits, dim=1)
     return (preds == labels).float().mean()
 
+
 def loop_consistency_loss(reencoded, pred_latents):
     return F.mse_loss(reencoded, pred_latents)
+
 
 def tokenize_text(text, tokenizer):
     """Tokenizes the input text using the provided tokenizer"""
@@ -110,31 +115,32 @@ def tokenize_text(text, tokenizer):
 def compute_validation_metrics(generated_videos, reference_videos):
     """Compute validation metrics between generated and reference videos."""
     metrics = {}
-    
+
     # Calculate SSIM
     ssim_values = []
     for i in range(len(generated_videos)):
         ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
         ssim_values.append(ssim_val)
-    metrics['ssim'] = np.mean(ssim_values)
-    
+    metrics["ssim"] = np.mean(ssim_values)
+
     # Calculate PSNR
     psnr_values = []
     for i in range(len(generated_videos)):
         psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
         psnr_values.append(psnr_val)
-    metrics['psnr'] = np.mean(psnr_values)
-    
+    metrics["psnr"] = np.mean(psnr_values)
+
     # You could add other metrics like FID if you have a pretrained model
-    
+
     return metrics
+
 
 def calculate_ssim(generated_video, reference_video):
     """Calculate SSIM between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-    
+
     # Calculate SSIM for each frame
     ssim_values = []
     for i in range(generated_video.shape[0]):
@@ -142,15 +148,16 @@ def calculate_ssim(generated_video, reference_video):
             generated_video[i], reference_video[i], multichannel=True
         )
         ssim_values.append(ssim_val)
-    
+
     return np.mean(ssim_values)
+
 
 def calculate_psnr(generated_video, reference_video):
     """Calculate PSNR between two videos."""
     # Convert to numpy arrays
     generated_video = generated_video.numpy()
     reference_video = reference_video.numpy()
-    
+
     # Calculate PSNR for each frame
     psnr_values = []
     for i in range(generated_video.shape[0]):
@@ -160,7 +167,7 @@ def calculate_psnr(generated_video, reference_video):
         else:
             psnr_val = 20 * np.log10(255.0 / np.sqrt(mse))
             psnr_values.append(psnr_val)
-    
+
     return np.mean(psnr_values)
 
 
@@ -203,28 +210,51 @@ def log_validation(
     ref_elements = [val_dataset[i] for i in indices]
     ref_frames = [e["image"] for e in ref_elements]
     ref_videos = [e["video"] for e in ref_elements]
-    
-    # Extract 3 reference frames at indices 0, 32, 63
+
+    # Option 1: Extract 3 reference frames at indices 0, 32, 63
+    # ref_frames_multi = []
+    # for e in ref_elements:
+    #     video = e["video"]  # C x T x H x W
+    #     ref_0 = video[:, 0, :, :]  # Frame at index 0
+    #     ref_32 = video[:, min(32, video.shape[1]-1), :, :]  # Frame at index 32 (or last frame if shorter)
+    #     ref_63 = video[:, min(63, video.shape[1]-1), :, :]  # Frame at index 63 (or last frame if shorter)
+    #     ref_frames_multi.append(torch.stack([ref_0, ref_32, ref_63], dim=1))  # C x 3 x H x W
+
+    # Option 2: Extract the key frames
     ref_frames_multi = []
     for e in ref_elements:
-        video = e["video"]  # C x T x H x W
-        ref_0 = video[:, 0, :, :]  # Frame at index 0
-        ref_32 = video[:, min(32, video.shape[1]-1), :, :]  # Frame at index 32 (or last frame if shorter)
-        ref_63 = video[:, min(63, video.shape[1]-1), :, :]  # Frame at index 63 (or last frame if shorter)
-        ref_frames_multi.append(torch.stack([ref_0, ref_32, ref_63], dim=1))  # C x 3 x H x W
-    
+        key_frames = e["key_frames"]  # B x C x H x W
+        if key_frames.shape[1] < 3:
+            raise ValueError("Key frames must have at least 3 frames.")
+        # adjust key frames to have 3 frames
+        key_frames = key_frames.view(4, 3, key_frames.shape[1], key_frames.shape[2])
+        ref_0 = key_frames[:, 0, :, :]  # Frame at index 0
+        ref_32 = key_frames[:, 1, :, :]  # Frame at index 32
+        ref_63 = key_frames[:, 2, :, :]  # Frame at index 63
+        ref_frames_multi.append(
+            torch.stack([ref_0, ref_32, ref_63], dim=1)
+        )  # B x C x 3 x H x W
+
     ref_frames_multi = torch.stack(ref_frames_multi, dim=0)  # B x C x 3 x H x W
     ref_frames_multi = ref_frames_multi.to(accelerator.device, weight_dtype)
-    
+
     # Create reference frames for the entire temporal sequence
     B, C, _, H, W = ref_frames_multi.shape
     T = config.validation_frames
-    ref_frames_expanded = torch.zeros(B, C, T, H, W, device=accelerator.device, dtype=weight_dtype)
-    
+    ref_frames_expanded = torch.zeros(
+        B, C, T, H, W, device=accelerator.device, dtype=weight_dtype
+    )
+
     # Apply reference frames to different temporal segments
-    ref_frames_expanded[:, :, :21, :, :] = ref_frames_multi[:, :, 0:1, :, :].repeat(1, 1, 21, 1, 1)  # 0th frame for indices 0-20
-    ref_frames_expanded[:, :, 21:43, :, :] = ref_frames_multi[:, :, 1:2, :, :].repeat(1, 1, 22, 1, 1)  # 32nd frame for indices 21-42
-    ref_frames_expanded[:, :, 43:, :, :] = ref_frames_multi[:, :, 2:3, :, :].repeat(1, 1, T-43, 1, 1)  # 63rd frame for indices 43-end
+    ref_frames_expanded[:, :, :21, :, :] = ref_frames_multi[:, :, 0:1, :, :].repeat(
+        1, 1, 21, 1, 1
+    )  # 0th frame for indices 0-20
+    ref_frames_expanded[:, :, 21:43, :, :] = ref_frames_multi[:, :, 1:2, :, :].repeat(
+        1, 1, 22, 1, 1
+    )  # 32nd frame for indices 21-42
+    ref_frames_expanded[:, :, 43:, :, :] = ref_frames_multi[:, :, 2:3, :, :].repeat(
+        1, 1, T - 43, 1, 1
+    )  # 63rd frame for indices 43-end
 
     # Get class labels if available
     if "class_id" in ref_elements[0]:
@@ -247,7 +277,7 @@ def log_validation(
             [e["lvef"] for e in ref_elements],
             device=accelerator.device,
             dtype=weight_dtype,
-        )           
+        )
     elif conditioning_type == "view":
         conditioning = torch.tensor(
             [e["view"] for e in ref_elements],
@@ -328,7 +358,9 @@ def log_validation(
                 latent_model_input = scheduler.scale_model_input(
                     latent_model_input, timestep=t
                 )
-                latent_model_input = torch.cat((latent_model_input, ref_frames_expanded), dim=1)
+                latent_model_input = torch.cat(
+                    (latent_model_input, ref_frames_expanded), dim=1
+                )
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
                 forward_kwargs = {"timestep": t, "encoder_hidden_states": conditioning}
@@ -375,7 +407,7 @@ def log_validation(
                     dummy_added_time_ids = torch.zeros(
                         (B, config.unet.addition_time_embed_dim),
                         device=accelerator.device,
-                        dtype=weight_dtype, 
+                        dtype=weight_dtype,
                     )
                     forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
@@ -402,13 +434,17 @@ def log_validation(
             latents_for_classifier = latents.detach().clone()
             if val_vae.__class__.__name__ == "AutoencoderKL":
                 # Reshape back for classifier
-                latents_for_classifier = rearrange(latents_for_classifier, "(b t) c h w -> b c t h w", b=B)
+                latents_for_classifier = rearrange(
+                    latents_for_classifier, "(b t) c h w -> b c t h w", b=B
+                )
             # Get predictions
             logits = val_classifier(latents_for_classifier.float())
             acc = compute_accuracy(logits, class_labels)
             metrics["val_accuracy"] = acc.item()
 
-        ref_frames = ref_frames_multi[:, :, 0, :, :]  # Use first reference frame for display
+        ref_frames = ref_frames_multi[
+            :, :, 0, :, :
+        ]  # Use first reference frame for display
         ref_frames = ref_frames / val_vae.config.scaling_factor
         ref_frames = val_vae.decode(ref_frames.float()).sample
         ref_frames = (ref_frames + 1) * 128  # [-1, 1] -> [0, 256]
@@ -567,11 +603,11 @@ def train(
             ema_unet.parameters(), model_cls=unet_klass, model_config=ema_unet.config
         )
         # Create EMA for classifier
-        ema_classifier = VideoClassifier(in_channels=4, num_classes=num_classes, hidden_dim=64)
+        ema_classifier = VideoClassifier(
+            in_channels=4, num_classes=num_classes, hidden_dim=64
+        )
         ema_classifier = EMAModel(
-            ema_classifier.parameters(),
-            model_cls=VideoClassifier,
-            model_config=None
+            ema_classifier.parameters(), model_cls=VideoClassifier, model_config=None
         )
         # Create EMA for text encoder if it's being trained
         if config.train_text_encoder:
@@ -594,7 +630,7 @@ def train(
                     # Save classifier EMA
                     torch.save(
                         accelerator.unwrap_model(ema_classifier).state_dict(),
-                        os.path.join(output_dir, "classifier_ema.pt")
+                        os.path.join(output_dir, "classifier_ema.pt"),
                     )
 
                 for i, model in enumerate(models):
@@ -605,7 +641,7 @@ def train(
                     elif i == 1:  # Second model is classifier
                         torch.save(
                             model.state_dict(),
-                            os.path.join(output_dir, "classifier.pt")
+                            os.path.join(output_dir, "classifier.pt"),
                         )
                     # Save text encoder if it's being trained
                     elif (
@@ -621,43 +657,67 @@ def train(
                 )
                 ema_unet.load_state_dict(load_model.state_dict())
                 ema_unet.to(accelerator.device)
-                
+
                 # Load classifier EMA if it exists
                 if os.path.exists(os.path.join(input_dir, "classifier_ema.pt")):
                     ema_classifier_state = torch.load(
                         os.path.join(input_dir, "classifier_ema.pt"),
-                        map_location=accelerator.device
+                        map_location=accelerator.device,
                     )
                     ema_classifier.load_state_dict(ema_classifier_state)
-                
+
                 del load_model
 
-            for i in range(len(models)):
-                model = models.pop()
-                # The models are popped in reverse order
-                if i == 0 and config.train_text_encoder:
-                    # Load text encoder if it exists and is being trained
-                    if os.path.isdir(os.path.join(input_dir, "text_encoder")):
-                        load_model = CLIPTextModel.from_pretrained(
-                            os.path.join(input_dir, "text_encoder")
-                        )
-                        model.load_state_dict(load_model.state_dict())
-                        del load_model
-                elif i == 1 or (i == 0 and not config.train_text_encoder):
-                    # Load classifier
-                    if os.path.exists(os.path.join(input_dir, "classifier.pt")):
-                        model.load_state_dict(
-                            torch.load(
-                                os.path.join(input_dir, "classifier.pt"),
-                                map_location=accelerator.device
-                            )
-                        )
-                else:
-                    # Load UNet
-                    load_model = unet_klass.from_pretrained(os.path.join(input_dir, "unet"))
-                    model.register_to_config(**load_model.config)
-                    model.load_state_dict(load_model.state_dict())
+            # Load models in the correct order - need to identify which model is which
+            # The models list contains [unet, classifier, text_encoder] (if train_text_encoder=True)
+            # or [unet, classifier] (if train_text_encoder=False)
+
+            # Load UNet
+            unet_model = None
+            classifier_model = None
+            text_encoder_model = None
+
+            for model in models:
+                if hasattr(model, "conv_in"):  # UNet has conv_in layer
+                    unet_model = model
+                elif hasattr(model, "conv1") and hasattr(
+                    model, "fc"
+                ):  # VideoClassifier has conv1 and fc
+                    classifier_model = model
+                elif hasattr(model, "text_model"):  # CLIPTextModel has text_model
+                    text_encoder_model = model
+
+            # Load UNet
+            if unet_model is not None and os.path.isdir(
+                os.path.join(input_dir, "unet")
+            ):
+                load_model = unet_klass.from_pretrained(os.path.join(input_dir, "unet"))
+                unet_model.register_to_config(**load_model.config)
+                unet_model.load_state_dict(load_model.state_dict())
+                del load_model
+
+            # Load classifier
+            if classifier_model is not None and os.path.exists(
+                os.path.join(input_dir, "classifier.pt")
+            ):
+                classifier_model.load_state_dict(
+                    torch.load(
+                        os.path.join(input_dir, "classifier.pt"),
+                        map_location=accelerator.device,
+                    )
+                )
+
+            # Load text encoder if it exists and is being trained
+            if text_encoder_model is not None and config.train_text_encoder:
+                if os.path.isdir(os.path.join(input_dir, "text_encoder")):
+                    load_model = CLIPTextModel.from_pretrained(
+                        os.path.join(input_dir, "text_encoder")
+                    )
+                    text_encoder_model.load_state_dict(load_model.state_dict())
                     del load_model
+
+            # Clear the models list since we've handled loading manually
+            models.clear()
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
@@ -676,7 +736,7 @@ def train(
     params_to_optimize = list(unet.parameters()) + list(classifier.parameters())
     if config.train_text_encoder:
         params_to_optimize += list(text_encoder.parameters())
-    
+
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=config.learning_rate,
@@ -718,13 +778,13 @@ def train(
     models_to_prepare = [unet, classifier]
     if config.train_text_encoder:
         models_to_prepare.append(text_encoder)
-    
+
     models_to_prepare.extend([optimizer, train_dataloader, lr_scheduler])
     prepared_objects = accelerator.prepare(*models_to_prepare)
-    
+
     unet = prepared_objects[0]
     classifier = prepared_objects[1]
-    
+
     if config.train_text_encoder:
         text_encoder = prepared_objects[2]
         optimizer, train_dataloader, lr_scheduler = prepared_objects[3:]
@@ -771,10 +831,9 @@ def train(
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = OmegaConf.to_container(config, resolve=True)
-        tracker_config.update({
-            "cls_loss_weight": cls_loss_weight,
-            "loop_loss_weight": loop_loss_weight
-        })
+        tracker_config.update(
+            {"cls_loss_weight": cls_loss_weight, "loop_loss_weight": loop_loss_weight}
+        )
         accelerator.init_trackers(
             config.tracker_project_name,
             tracker_config,
@@ -810,9 +869,7 @@ def train(
     logger.info(
         f"  U-Net: Total params = {model_num_params} \t Trainable params = {model_trainable_params} ({model_trainable_params / model_num_params * 100:.2f}%)"
     )
-    logger.info(
-        f"  Classifier: Total params = {cls_num_params}"
-    )
+    logger.info(f"  Classifier: Total params = {cls_num_params}")
     logger.info(f"  Classification loss weight = {cls_loss_weight}")
     logger.info(f"  Loop consistency loss weight = {loop_loss_weight}")
 
@@ -867,24 +924,40 @@ def train(
             with accelerator.accumulate(unet):
                 # Get batch data
                 latents = batch["video"]  # B x C x T x H x W
-                # ref_frame = batch["image"]  # B x C x H x W  # Remove old single ref frame
                 padding_indices = batch["padding"]  # B
-
-                # Extract 3 reference frames at indices 0, 32, 63 from the video
+                key_frames = batch["key_frames"]  # B x C x H x W
+                # split key frames into 3 reference frames by C (from 12 to 4 each)
+                key_frames = key_frames.view(
+                    key_frames.shape[0], 4, 3, key_frames.shape[2], key_frames.shape[3]
+                )  # B x 4 x 3 x H x W
                 B, C, T, H, W = latents.shape
-                ref_0 = latents[:, :, 0, :, :]  # Frame at index 0
-                ref_32 = latents[:, :, torch.clamp(torch.tensor(32), 0, T-1), :, :]  # Frame at index 32
-                ref_63 = latents[:, :, torch.clamp(torch.tensor(63), 0, T-1), :, :]  # Frame at index 63
-                
+
+                # Extract 3 reference frames at indices 0, 32, 63 from the video (here we use specific indices)
+                # ref_0 = latents[:, :, 0, :, :]  # Frame at index 0
+                # ref_32 = latents[:, :, torch.clamp(torch.tensor(32), 0, T-1), :, :]  # Frame at index 32
+                # ref_63 = latents[:, :, torch.clamp(torch.tensor(63), 0, T-1), :, :]  # Frame at index 63
+
+                # Extract key frames for reference (here we use the provided key frames)
+                assert key_frames.shape[2] == 3, "Key frames should have 3 frames"
+                ref_0 = key_frames[:, :, 0, :, :]  # Use key frames for reference
+                ref_32 = key_frames[:, :, 1, :, :]
+                ref_63 = key_frames[:, :, 2, :, :]
+
                 # Create reference frames for the entire temporal sequence
                 ref_frame_expanded = torch.zeros_like(latents)  # B x C x T x H x W
-                
+
                 # Apply reference frames to different temporal segments
-                ref_frame_expanded[:, :, :21, :, :] = ref_0.unsqueeze(2).repeat(1, 1, min(21, T), 1, 1)  # 0th frame for indices 0-20
+                ref_frame_expanded[:, :, :21, :, :] = ref_0.unsqueeze(2).repeat(
+                    1, 1, min(21, T), 1, 1
+                )  # 0th frame for indices 0-20
                 if T > 21:
-                    ref_frame_expanded[:, :, 21:43, :, :] = ref_32.unsqueeze(2).repeat(1, 1, min(22, T-21), 1, 1)  # 32nd frame for indices 21-42
+                    ref_frame_expanded[:, :, 21:43, :, :] = ref_32.unsqueeze(2).repeat(
+                        1, 1, min(22, T - 21), 1, 1
+                    )  # 32nd frame for indices 21-42
                 if T > 43:
-                    ref_frame_expanded[:, :, 43:, :, :] = ref_63.unsqueeze(2).repeat(1, 1, T-43, 1, 1)  # 63rd frame for indices 43-end
+                    ref_frame_expanded[:, :, 43:, :, :] = ref_63.unsqueeze(2).repeat(
+                        1, 1, T - 43, 1, 1
+                    )  # 63rd frame for indices 43-end
 
                 # Get class labels if available for classifier
                 if "class_id" in batch:
@@ -906,14 +979,14 @@ def train(
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
 
-                    # Add a seed reset before processing text through CLIP to avoid 
+                    # Add a seed reset before processing text through CLIP to avoid
                     # potential RNG state corruption across processes
                     if torch.distributed.is_initialized():
                         # Manually reset seed to avoid mt19937 state corruption
                         torch.manual_seed(1000 + global_step)
                         if torch.cuda.is_available():
                             torch.cuda.manual_seed_all(1000 + global_step)
-                    
+
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
@@ -951,9 +1024,6 @@ def train(
                     > uncond_p
                 )
                 conditioning = conditioning * conditioning_mask
-
-                # Replicate reference frame across time dimension
-                # ref_frame_expanded = ref_frame_expanded[:, :, None, :, :].repeat(1, 1, T, 1, 1)
 
                 # Sample timesteps
                 timesteps = torch.randint(
@@ -1026,7 +1096,9 @@ def train(
                     target = latents - noise
 
                 # Compute denoising loss with masking
-                denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                denoise_loss = F.mse_loss(
+                    model_pred.float(), target.float(), reduction="none"
+                )
                 denoise_loss = denoise_loss * mask
                 denoise_loss = denoise_loss.mean()
 
@@ -1037,78 +1109,106 @@ def train(
                         alpha_t = scheduler._get_alpha_prod(timesteps)
                         alpha_t = alpha_t.view(-1, 1, 1, 1, 1)
                         sqrt_one_minus_at = torch.sqrt(1 - alpha_t)
-                        pred_latents = (noisy_latents - sqrt_one_minus_at * model_pred) / torch.sqrt(alpha_t)
+                        pred_latents = (
+                            noisy_latents - sqrt_one_minus_at * model_pred
+                        ) / torch.sqrt(alpha_t)
                     else:
                         pred_latents = model_pred
                 else:  # flow_matching
                     pred_latents = latents
-                
+
                 # Pass through classifier
                 cls_loss = torch.tensor(0.0, device=accelerator.device)
                 loop_loss = torch.tensor(0.0, device=accelerator.device)
                 accuracy = torch.tensor(0.0, device=accelerator.device)
-                
+
                 if class_labels is not None:
                     # Keep pred_latents on device for VAE processing
-                    pred_latents_for_decode = pred_latents.detach().to(dtype=weight_dtype)
-                    
+                    pred_latents_for_decode = pred_latents.detach().to(
+                        dtype=weight_dtype
+                    )
+
                     # Handle different VAE types
                     if vae.__class__.__name__ == "AutoencoderKL":
                         # Reshape for 2D VAE
-                        pred_latents_reshaped = rearrange(pred_latents_for_decode, "b c t h w -> (b t) c h w")
+                        pred_latents_reshaped = rearrange(
+                            pred_latents_for_decode, "b c t h w -> (b t) c h w"
+                        )
                     else:
                         pred_latents_reshaped = pred_latents_for_decode
-                    
+
                     # Decode to images (keep on device)
                     with torch.no_grad():
-                        pred_decoded = vae.decode(pred_latents_reshaped / vae.config.scaling_factor).sample
-                        
+                        pred_decoded = vae.decode(
+                            pred_latents_reshaped / vae.config.scaling_factor
+                        ).sample
+
                         # Reshape back if needed
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            pred_decoded = rearrange(pred_decoded, "(b t) c h w -> b c t h w", b=B)
-                
+                            pred_decoded = rearrange(
+                                pred_decoded, "(b t) c h w -> b c t h w", b=B
+                            )
+
                     # Pass through classifier - use original predicted latents
                     logits = classifier(pred_latents.float())
                     cls_loss = classification_loss(logits, class_labels).float()
                     accuracy = compute_accuracy(logits, class_labels).float()
-                    
+
                     # Loop consistency: re-encode decoded images
                     with torch.no_grad():
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            pred_decoded_flat = rearrange(pred_decoded, "b c t h w -> (b t) c h w")
+                            pred_decoded_flat = rearrange(
+                                pred_decoded, "b c t h w -> (b t) c h w"
+                            )
                         else:
                             pred_decoded_flat = pred_decoded
-                        
+
                         reencoded = vae.encode(pred_decoded_flat).latent_dist.sample()
                         reencoded = reencoded * vae.config.scaling_factor
-                        
+
                         if vae.__class__.__name__ == "AutoencoderKL":
-                            reencoded = rearrange(reencoded, "(b t) c h w -> b c t h w", b=B)
-                    
-                    loop_loss = loop_consistency_loss(reencoded, pred_latents.float()).float()
+                            reencoded = rearrange(
+                                reencoded, "(b t) c h w -> b c t h w", b=B
+                            )
+
+                    loop_loss = loop_consistency_loss(
+                        reencoded, pred_latents.float()
+                    ).float()
 
                 # Total loss
-                loss = denoise_loss + cls_loss_weight * cls_loss + loop_loss_weight * loop_loss
+                loss = (
+                    denoise_loss
+                    + cls_loss_weight * cls_loss
+                    + loop_loss_weight * loop_loss
+                )
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(
                     loss.repeat(config.train_batch_size)
                 ).mean()
                 train_loss += avg_loss.item() / config.gradient_accumulation_steps
-                
+
                 # Track component losses
-                train_denoise_loss += denoise_loss.item() / config.gradient_accumulation_steps
+                train_denoise_loss += (
+                    denoise_loss.item() / config.gradient_accumulation_steps
+                )
                 if class_labels is not None:
-                    train_cls_loss += cls_loss.item() / config.gradient_accumulation_steps
-                    train_loop_loss += loop_loss.item() / config.gradient_accumulation_steps
-                    train_accuracy += accuracy.item() / config.gradient_accumulation_steps
+                    train_cls_loss += (
+                        cls_loss.item() / config.gradient_accumulation_steps
+                    )
+                    train_loop_loss += (
+                        loop_loss.item() / config.gradient_accumulation_steps
+                    )
+                    train_accuracy += (
+                        accuracy.item() / config.gradient_accumulation_steps
+                    )
 
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(
-                        list(unet.parameters()) + list(classifier.parameters()), 
-                        config.max_grad_norm
+                        list(unet.parameters()) + list(classifier.parameters()),
+                        config.max_grad_norm,
                     )
                 optimizer.step()
                 lr_scheduler.step()
@@ -1241,7 +1341,7 @@ def train(
         # Create the pipeline using the trained modules
         unet = accelerator.unwrap_model(unet)
         classifier = accelerator.unwrap_model(classifier)
-        
+
         if config.use_ema:
             ema_unet.copy_to(unet.parameters())
             ema_classifier.copy_to(classifier.parameters())
@@ -1262,15 +1362,18 @@ def train(
 
         # Always save the UNet
         unet.save_pretrained(os.path.join(config.output_dir, "unet"))
-        
+
         # Save the classifier
-        torch.save(classifier.state_dict(), os.path.join(config.output_dir, "classifier.pt"))
+        torch.save(
+            classifier.state_dict(), os.path.join(config.output_dir, "classifier.pt")
+        )
 
         # Save the config
         OmegaConf.save(config, os.path.join(config.output_dir, "config.yaml"))
         logger.info(f"Saved models and config to {config.output_dir}")
 
     accelerator.end_training()
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -1294,22 +1397,26 @@ def parse_args():
         help="Type of conditioning to use",
     )
     parser.add_argument(
-        "--cls_loss_weight", 
-        type=float, 
-        default=1.0, 
-        help="Weight for classification loss"
+        "--cls_loss_weight",
+        type=float,
+        default=1.0,
+        help="Weight for classification loss",
     )
     parser.add_argument(
-        "--loop_loss_weight", 
-        type=float, 
-        default=0.5, 
-        help="Weight for loop consistency loss"
+        "--loop_loss_weight",
+        type=float,
+        default=0.5,
+        help="Weight for loop consistency loss",
     )
     parser.add_argument(
-        "--num_classes", 
-        type=int, 
-        default=2, 
-        help="Number of classes for classifier"
+        "--num_classes", type=int, default=2, help="Number of classes for classifier"
+    )
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default="no",
+        choices=["no", "fp16", "bf16"],
+        help="Mixed precision training mode",
     )
     return parser.parse_args()
 
@@ -1325,8 +1432,8 @@ if __name__ == "__main__":
     config.cls_loss_weight = args.cls_loss_weight
     config.loop_loss_weight = args.loop_loss_weight
     config.num_classes = args.num_classes
-    config.mixed_precision = args.mixed_precision if hasattr(args, "mixed_precision") else "no"
-    
+    config.mixed_precision = args.mixed_precision
+
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (
         not hasattr(config, "text_encoder_path")

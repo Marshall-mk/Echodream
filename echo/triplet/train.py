@@ -7,8 +7,8 @@ from einops import rearrange
 from omegaconf import OmegaConf
 import numpy as np
 from tqdm.auto import tqdm
-from skimage.metrics import structural_similarity
 from packaging import version
+from skimage.metrics import structural_similarity
 from functools import partial
 from copy import deepcopy
 
@@ -17,51 +17,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 
 import accelerate
 from accelerate import Accelerator
 from accelerate.logging import get_logger
+from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
 
 import diffusers
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
-    DiffusionPipeline,
     UNet3DConditionModel,
     UNetSpatioTemporalConditionModel,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
+from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import (
     check_min_version,
     deprecate,
     is_wandb_available,
     make_image_grid,
 )
+from diffusers.utils.import_utils import is_xformers_available
 from transformers import CLIPTextModel, CLIPTokenizer
-from echo.common import (
-    padf,
-    unpadf,
-    pad_reshape,
-    unpad_reshape,
-    instantiate_from_config,
-    FlowMatchingScheduler,
-)
 from echo.common.datasets import instantiate_dataset
+from echo.common import padf, unpadf, instantiate_from_config, FlowMatchingScheduler
 
 if is_wandb_available():
     import wandb
 
-# Will error if the minimal version of diffusers is not installed.
+# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.22.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-""" Example command to run this script with 4 GPUs:
-CUDA_VISIBLE_DEVICES='0,1,5,6' accelerate launch  --num_processes 4  --multi_gpu   
---mixed_precision fp16 -m  echo.lvdm.train_multi_ref  --config echo/lvdm/configs/cardiac_asd.yaml 
---training_mode diffusion --conditioning_type class_id
+"""
+CUDA_VISIBLE_DEVICES='1,2,7' accelerate launch  
+	--num_processes 3 
+	--multi_gpu   
+	--mixed_precision fp16 
+	-m  echo.triplet.train  
+	--config echo/triplet/configs/cardiac_asd.yaml 
+	--training_mode diffusion 
+	--conditioning_type class_id
+ 	--condition_guidance_scale 5.0 
 """
 
 
@@ -77,21 +78,21 @@ def tokenize_text(text, tokenizer):
     return tokenized_text.input_ids, tokenized_text.attention_mask
 
 
-def compute_validation_metrics(generated_videos, reference_videos):
-    """Compute validation metrics between generated and reference videos."""
+def compute_validation_metrics(generated_images, reference_images):
+    """Compute validation metrics between generated and reference images."""
     metrics = {}
 
     # Calculate SSIM
     ssim_values = []
-    for i in range(len(generated_videos)):
-        ssim_val = calculate_ssim(generated_videos[i], reference_videos[i])
+    for i in range(len(generated_images)):
+        ssim_val = calculate_ssim(generated_images[i], reference_images[i])
         ssim_values.append(ssim_val)
     metrics["ssim"] = np.mean(ssim_values)
 
     # Calculate PSNR
     psnr_values = []
-    for i in range(len(generated_videos)):
-        psnr_val = calculate_psnr(generated_videos[i], reference_videos[i])
+    for i in range(len(generated_images)):
+        psnr_val = calculate_psnr(generated_images[i], reference_images[i])
         psnr_values.append(psnr_val)
     metrics["psnr"] = np.mean(psnr_values)
 
@@ -100,33 +101,33 @@ def compute_validation_metrics(generated_videos, reference_videos):
     return metrics
 
 
-def calculate_ssim(generated_video, reference_video):
-    """Calculate SSIM between two videos."""
+def calculate_ssim(generated_images, reference_image):
+    """Calculate SSIM between two images."""
     # Convert to numpy arrays
-    generated_video = generated_video.numpy()
-    reference_video = reference_video.numpy()
+    generated_images = generated_images.numpy()
+    reference_image = reference_image.numpy()
 
     # Calculate SSIM for each frame
     ssim_values = []
-    for i in range(generated_video.shape[0]):
+    for i in range(generated_images.shape[0]):
         ssim_val = structural_similarity(
-            generated_video[i], reference_video[i], multichannel=True
+            generated_images[i], reference_image[i], multichannel=True
         )
         ssim_values.append(ssim_val)
 
     return np.mean(ssim_values)
 
 
-def calculate_psnr(generated_video, reference_video):
-    """Calculate PSNR between two videos."""
+def calculate_psnr(generated_image, reference_image):
+    """Calculate PSNR between two images."""
     # Convert to numpy arrays
-    generated_video = generated_video.numpy()
-    reference_video = reference_video.numpy()
+    generated_image = generated_image.numpy()
+    reference_image = reference_image.numpy()
 
     # Calculate PSNR for each frame
     psnr_values = []
-    for i in range(generated_video.shape[0]):
-        mse = np.mean((generated_video[i] - reference_video[i]) ** 2)
+    for i in range(generated_image.shape[0]):
+        mse = np.mean((generated_image[i] - reference_image[i]) ** 2)
         if mse == 0:
             psnr_values.append(float("inf"))
         else:
@@ -156,10 +157,7 @@ def log_validation(
     scheduler.set_timesteps(config.validation_timesteps)
     timesteps = scheduler.timesteps
 
-    if (
-        hasattr(config, "enable_xformers_memory_efficient_attention")
-        and config.enable_xformers_memory_efficient_attention
-    ):
+    if config.enable_xformers_memory_efficient_attention:
         val_unet.enable_xformers_memory_efficient_attention()
 
     if config.seed is None:
@@ -168,58 +166,15 @@ def log_validation(
         generator = torch.Generator(device=accelerator.device).manual_seed(config.seed)
 
     indices = np.random.choice(
-        len(val_dataset), size=config.num_validation_samples, replace=False
+        len(val_dataset), size=config.validation_count, replace=False
     )
     ref_elements = [val_dataset[i] for i in indices]
-    ref_frames = [e["image"] for e in ref_elements]
-    ref_videos = [e["video"] for e in ref_elements]
+    ref_frames = [e["key_frames"] for e in ref_elements]
+    ref_frames = torch.stack(ref_frames, dim=0)  # B x C x H x W
+    ref_frames = ref_frames.to(accelerator.device, dtype=weight_dtype)
 
-    # Option 1: Extract 3 reference frames at indices 0, 32, 63
-    # ref_frames_multi = []
-    # for e in ref_elements:
-    #     video = e["video"]  # C x T x H x W
-    #     ref_0 = video[:, 0, :, :]  # Frame at index 0
-    #     ref_32 = video[:, min(32, video.shape[1]-1), :, :]  # Frame at index 32 (or last frame if shorter)
-    #     ref_63 = video[:, min(63, video.shape[1]-1), :, :]  # Frame at index 63 (or last frame if shorter)
-    #     ref_frames_multi.append(torch.stack([ref_0, ref_32, ref_63], dim=1))  # C x 3 x H x W
-
-    # Option 2: Extract the key frames
-    ref_frames_multi = []
-    for e in ref_elements:
-        key_frames = e["key_frames"]  # B x C x H x W
-        print(f"Key frames shape: {key_frames.shape}")
-        if key_frames.shape[1] < 3:
-            raise ValueError("Key frames must have at least 3 frames.")
-        # adjust key frames to have 3 frames
-        key_frames = key_frames.view(4, 3, key_frames.shape[1], key_frames.shape[2])
-        ref_0 = key_frames[:, 0, :, :]  # Frame at index 0
-        ref_32 = key_frames[:, 1, :, :]  # Frame at index 32
-        ref_63 = key_frames[:, 2, :, :]  # Frame at index 63
-        ref_frames_multi.append(
-            torch.stack([ref_0, ref_32, ref_63], dim=1)
-        )  # C x 3 x H x W
-
-    ref_frames_multi = torch.stack(ref_frames_multi, dim=0)  # B x C x 3 x H x W
-    ref_frames_multi = ref_frames_multi.to(accelerator.device, weight_dtype)
-
-    # Create reference frames for the entire temporal sequence
-    B, C, _, H, W = ref_frames_multi.shape
-    T = config.validation_frames
-    ref_frames_expanded = torch.zeros(
-        B, C, T, H, W, device=accelerator.device, dtype=weight_dtype
-    )
-
-    # Apply reference frames to different temporal segments
-    ref_frames_expanded[:, :, :21, :, :] = ref_frames_multi[:, :, 0:1, :, :].repeat(
-        1, 1, 21, 1, 1
-    )  # 0th frame for indices 0-20
-    ref_frames_expanded[:, :, 21:43, :, :] = ref_frames_multi[:, :, 1:2, :, :].repeat(
-        1, 1, 22, 1, 1
-    )  # 32nd frame for indices 21-42
-    ref_frames_expanded[:, :, 43:, :, :] = ref_frames_multi[:, :, 2:3, :, :].repeat(
-        1, 1, T - 43, 1, 1
-    )  # 63rd frame for indices 43-end
-
+    format_input = padf
+    format_output = unpadf
     # Get conditioning based on type
     if conditioning_type == "class_id":
         conditioning = torch.tensor(
@@ -249,7 +204,6 @@ def log_validation(
         conditioning = text_encoder(
             input_ids=input_ids, attention_mask=attention_mask
         ).last_hidden_state.to(dtype=weight_dtype)
-
     else:
         raise ValueError(f"Unsupported conditioning type: {conditioning_type}")
 
@@ -259,88 +213,68 @@ def log_validation(
     ):  # text embeddings would already be in the right shape
         conditioning = conditioning[:, None, None]  # B -> B x 1 x 1
 
-    if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-        dummy_added_time_ids = torch.zeros(
-            (len(indices), config.unet.addition_time_embed_dim),
-            device=accelerator.device,
-            dtype=weight_dtype,
-        )
-        unet = partial(unet, added_time_ids=dummy_added_time_ids)
-
-    format_input = (
-        pad_reshape
-        if config.unet._class_name == "UNetSpatioTemporalConditionModel"
-        else padf
-    )
-    format_output = (
-        unpad_reshape
-        if config.unet._class_name == "UNetSpatioTemporalConditionModel"
-        else unpadf
-    )
-
     logger.info("Sampling... ")
     with torch.no_grad(), torch.autocast("cuda"):
         # prepare model inputs
-        B, C, T, H, W = (
-            len(indices),
-            4,
-            config.validation_frames,
+        B, C, H, W = (
+            config.validation_count,
+            12,
             config.unet.sample_size,
             config.unet.sample_size,
         )
         latents = torch.randn(
-            (B, C, T, H, W),
+            (B, C, H, W),
             device=accelerator.device,
             dtype=weight_dtype,
             generator=generator,
         )
+        condition_guidance_scale = getattr(config, "condition_guidance_scale", 5.0)
+        # Set up for class guidance
+        if condition_guidance_scale > 1.0:
+            # For class guidance, create a no-class condition (either zeros or empty)
+            if conditioning_type == "text":
+                # For text, use empty text embeddings from the tokenizer
+                empty_text = [""] * len(ref_elements)
+                empty_ids, empty_mask = tokenize_text(empty_text, tokenizer)
+                empty_ids = empty_ids.to(accelerator.device)
+                empty_mask = empty_mask.to(accelerator.device)
+                uncond_class = text_encoder(
+                    input_ids=empty_ids, attention_mask=empty_mask
+                ).last_hidden_state.to(dtype=weight_dtype)
+            else:
+                # For other condition types, use zeros
+                uncond_class = torch.zeros_like(conditioning)
 
-        # Set up for guidance if needed
-        if hasattr(config, "validation_guidance") and config.validation_guidance > 1.0:
-            conditioning = torch.cat([conditioning] * 2)
-            ref_frames_expanded = torch.cat([ref_frames_expanded] * 2)
+            # Concatenate class conditions with unconditional ones
+            combined_class = torch.cat([uncond_class, conditioning])
+        else:
+            combined_class = conditioning
 
         # Sampling loop
         if config.training_mode == "diffusion":
-            # Diffusion sampling loop
+            # reverse diffusionn loop
             for t in timesteps:
-                latent_model_input = (
-                    torch.cat([latents] * 2)
-                    if hasattr(config, "validation_guidance")
-                    and config.validation_guidance > 1.0
-                    else latents
-                )
+                latent_model_input = latents
+                if condition_guidance_scale > 1.0:
+                    latent_model_input = torch.cat([latent_model_input] * 2)
                 latent_model_input = scheduler.scale_model_input(
                     latent_model_input, timestep=t
                 )
-                latent_model_input = torch.cat(
-                    (latent_model_input, ref_frames_expanded), dim=1
-                )
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
-
-                forward_kwargs = {"timestep": t, "encoder_hidden_states": conditioning}
-                if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-                    dummy_added_time_ids = torch.zeros(
-                        (B, config.unet.addition_time_embed_dim),
-                        device=accelerator.device,
-                        dtype=weight_dtype,
-                    )
-                    forward_kwargs["added_time_ids"] = dummy_added_time_ids
-
+                forward_kwargs = {
+                    "timestep": t,
+                    "encoder_hidden_states": combined_class,
+                }
                 noise_pred = unet(latent_model_input, **forward_kwargs).sample
                 noise_pred = format_output(noise_pred, pad=padding)
-
-                if (
-                    hasattr(config, "validation_guidance")
-                    and config.validation_guidance > 1.0
-                ):
-                    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + config.validation_guidance * (
+                # Apply guidance
+                if condition_guidance_scale > 1.0:
+                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                    # Apply class guidance
+                    noise_pred = noise_pred_uncond + condition_guidance_scale * (
                         noise_pred_cond - noise_pred_uncond
                     )
-
                 latents = scheduler.step(noise_pred, t, latents).prev_sample
-
         else:
             # Flow matching sampling (simplified)
             t_steps = torch.linspace(
@@ -351,85 +285,98 @@ def log_validation(
             for i in range(len(t_steps) - 1):
                 t = t_steps[i]
                 t_tensor = t.repeat(B)
-                latent_model_input = torch.cat((latents, ref_frames_expanded), dim=1)
+
+                # Prepare batched latents based on guidance configuration
+                latent_model_input = latents
+
+                if condition_guidance_scale > 1.0:
+                    latent_model_input = torch.cat([latent_model_input] * 2)
+
                 latent_model_input, padding = format_input(latent_model_input, mult=3)
 
+                # Forward pass
                 forward_kwargs = {
-                    "timestep": t_tensor,
-                    "encoder_hidden_states": conditioning,
+                    "timestep": t_tensor
+                    if condition_guidance_scale <= 1.0
+                    else t_tensor.repeat(2),
+                    "encoder_hidden_states": combined_class,
                 }
-                if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-                    dummy_added_time_ids = torch.zeros(
-                        (B, config.unet.addition_time_embed_dim),
-                        device=accelerator.device,
-                        dtype=weight_dtype,
-                    )
-                    forward_kwargs["added_time_ids"] = dummy_added_time_ids
 
                 velocity_pred = unet(latent_model_input, **forward_kwargs).sample
                 velocity_pred = format_output(velocity_pred, pad=padding)
+
+                # Apply guidance
+                if condition_guidance_scale > 1.0:
+                    velocity_pred_uncond, velocity_pred_cond = velocity_pred.chunk(2)
+                    # Apply class guidance
+                    velocity_pred = velocity_pred_uncond + condition_guidance_scale * (
+                        velocity_pred_cond - velocity_pred_uncond
+                    )
 
                 # Euler step
                 latents = latents - velocity_pred * dt
 
     # VAE decoding
-    with torch.no_grad():
-        if val_vae.__class__.__name__ == "AutoencoderKL":
-            latents = rearrange(latents, "b c t h w -> (b t) c h w")
+    with torch.no_grad():  # no autocast
+        # Split 12 channels into 3 frames of 4 channels each
         latents = latents / val_vae.config.scaling_factor
-        videos = val_vae.decode(latents.float()).sample
-        videos = (videos + 1) * 128
-        videos = videos.clamp(0, 255).to(torch.uint8).cpu()
-        if val_vae.__class__.__name__ == "AutoencoderKL":
-            videos = rearrange(videos, "(b t) c h w -> b c t h w", b=B)
-        ref_frames = ref_frames_multi[
-            :, :, 0, :, :
-        ]  # Use first reference frame for display
+        B, C, H, W = latents.shape  # C should be 12
+        assert C == 12, f"Expected 12 channels, got {C}"
+
+        # Reshape to (B*3, 4, H, W) for VAE decoding
+        latents_frames = latents.view(B, 3, 4, H, W).view(B * 3, 4, H, W)
+        images_frames = val_vae.decode(latents_frames.float()).sample
+        # Reshape back to (B, 3, 3, H * 8, W * 8) then merge to (B, 9, H * 8, W * 8)
+        images = images_frames.view(B, 3, 3, H * 8, W * 8).view(B, 9, H * 8, W * 8)
+        images = (images + 1) * 128  # [-1, 1] -> [0, 256]
+        images = images.clamp(0, 255).to(torch.uint8).cpu()
+
+        # Same process for reference frames
         ref_frames = ref_frames / val_vae.config.scaling_factor
-        ref_frames = val_vae.decode(ref_frames.float()).sample
+        ref_B, ref_C, ref_H, ref_W = ref_frames.shape
+        if ref_C == 12:  # Handle case where ref_frames also has 12 channels
+            ref_frames_split = ref_frames.view(ref_B, 3, 4, ref_H, ref_W).view(
+                ref_B * 3, 4, ref_H, ref_W
+            )
+            ref_decoded = val_vae.decode(ref_frames_split.float()).sample
+            ref_frames = ref_decoded.view(ref_B, 3, 3, ref_H * 8, ref_W * 8).view(
+                ref_B, 9, ref_H * 8, ref_W * 8
+            )
+        else:  # Handle case where ref_frames has 4 channels (single frame)
+            ref_frames = val_vae.decode(ref_frames.float()).sample
         ref_frames = (ref_frames + 1) * 128  # [-1, 1] -> [0, 256]
         ref_frames = ref_frames.clamp(0, 255).to(torch.uint8).cpu()
-        ref_frames = ref_frames[:, :, None, :, :].repeat(
-            1, 1, config.validation_frames, 1, 1
-        )  # B x C x T x H x W
 
-        ref_videos = torch.stack(ref_videos, dim=0).to(
-            device=accelerator.device
-        )  # B x C x T x H x W
-        if val_vae.__class__.__name__ == "AutoencoderKL":  # is 2D
-            ref_videos = rearrange(ref_videos, "b c t h w -> (b t) c h w")
-        ref_videos = ref_videos / val_vae.config.scaling_factor
-        ref_videos = val_vae.decode(ref_videos.float()).sample
-        ref_videos = (ref_videos + 1) * 128  # [-1, 1] -> [0, 256]
-        ref_videos = ref_videos.clamp(0, 255).to(torch.uint8).cpu()
-        if val_vae.__class__.__name__ == "AutoencoderKL":  # is 2D
-            ref_videos = rearrange(ref_videos, "(b t) c h w -> b c t h w", b=B)
         try:
-            metrics = compute_validation_metrics(videos, ref_videos)
+            metrics = compute_validation_metrics(images, ref_frames)
         except Exception as e:
             logger.error(f"Error computing validation metrics: {e}")
             metrics = {}
-        videos = torch.cat(
-            [ref_frames, ref_videos, videos], dim=3
-        )  # B x C x T x (3 H) x W // vertical concat
 
-    # reshape for wandb
-    videos = rearrange(videos, "b c t h w -> t c h (b w)")  # prepare for wandb
-    videos = videos.numpy()
+        # Concatenate for visualization - now handling 3 frames
+        images = torch.cat(
+            [ref_frames, images], dim=2
+        )  # B x C x (2 H) x W // vertical concat
+
+    # reshape for wandb - handle 9 channels by splitting into 3 RGB frames
+    B, C, H, W = images.shape
+    if C == 9:  # 3 frames of 3 channels each
+        # Reshape to show 3 frames side by side: (B, 3, H, 3*W)
+        images = images.view(B, 3, 3, H, W)  # B x 3frames x 3channels x H x W
+        images = images.permute(0, 2, 3, 1, 4)  # B x 3channels x H x 3frames x W
+        images = images.contiguous().view(B, 3, H, 3 * W)  # B x 3channels x H x (3*W)
+        # Now reshape for wandb: H x (B * 3*W) x 3
+        images = rearrange(images, "b c h w -> h (b w) c")
+    else:
+        # Original logic for other channel counts
+        images = rearrange(images, "b c h w -> h (b w) c")  # prepare for wandb
+    images = images.numpy()
 
     logger.info("Done sampling... ")
-    if config.validation_fps == "original":
-        config.validation_fps = 50.0
+
     for tracker in accelerator.trackers:
         if tracker.name == "wandb":
-            tracker.log(
-                {
-                    "validation_videos": wandb.Video(
-                        videos, caption=f"Epoch {epoch}", fps=config.validation_fps
-                    ),
-                    **metrics,
-                }
-            )
+            tracker.log({"validation": wandb.Image(images), **metrics})
             logger.info("Samples sent to wandb.")
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
@@ -438,7 +385,7 @@ def log_validation(
     del val_vae
     torch.cuda.empty_cache()
 
-    return videos
+    return images
 
 
 def train(
@@ -448,6 +395,7 @@ def train(
 ):
     # Setup accelerator
     logging_dir = os.path.join(config.output_dir, config.logging_dir)
+
     accelerator_project_config = ProjectConfiguration(
         project_dir=config.output_dir, logging_dir=logging_dir
     )
@@ -455,23 +403,27 @@ def train(
     accelerator = Accelerator(
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         mixed_precision=config.mixed_precision,
-        project_config=accelerator_project_config,
         log_with=config.report_to,
+        project_config=accelerator_project_config,
     )
 
-    # Basic logging setup
+    # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
     logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        diffusers.utils.logging.set_verbosity_error()
 
-    # Set seed for reproducibility
+    # If passed along, set the training seed now.
     if config.seed is not None:
         set_seed(config.seed)
 
-    # Create output directory if it doesn't exist
+    # Handle the repository creation
     if accelerator.is_main_process:
         if config.output_dir is not None:
             os.makedirs(config.output_dir, exist_ok=True)
@@ -491,35 +443,26 @@ def train(
         scheduler = FlowMatchingScheduler(
             num_train_timesteps=config.get("num_train_timesteps", 1000)
         )
-
     # Save training mode to config
     config.training_mode = training_mode
 
     # Load VAE
     vae = AutoencoderKL.from_pretrained(config.vae_path).cpu()
 
-    # Create UNet model
+    # Create the video unet
     unet, unet_klass, unet_kwargs = instantiate_from_config(
         config.unet, ["diffusers"], return_klass_kwargs=True
     )
+    noise_scheduler = instantiate_from_config(config.noise_scheduler, ["diffusers"])
 
-    # Set up format functions based on model type
-    format_input = (
-        pad_reshape
-        if config.unet._class_name == "UNetSpatioTemporalConditionModel"
-        else padf
-    )
-    format_output = (
-        unpad_reshape
-        if config.unet._class_name == "UNetSpatioTemporalConditionModel"
-        else unpadf
-    )
+    format_input = padf
+    format_output = unpadf
 
     # setup text encoder and tokenizer
     tokenizer = CLIPTokenizer.from_pretrained(config.pretrained_model_name_or_path)
     text_encoder = CLIPTextModel.from_pretrained(config.pretrained_model_name_or_path)
 
-    # Freeze VAE, train UNet
+    # Freeze vae and text_encoder and set unet to trainable
     vae.requires_grad_(False)
     unet.train()
 
@@ -528,7 +471,7 @@ def train(
     else:
         text_encoder.train()
 
-    # Create EMA for the UNet if needed
+    # Create EMA for the unet.
     if config.use_ema:
         ema_unet = unet_klass(**unet_kwargs)
         ema_unet = EMAModel(
@@ -545,7 +488,6 @@ def train(
                 model_config=ema_text_encoder.config,
             )
 
-    # Register hooks for model saving and loading
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
 
         def save_model_hook(models, weights, output_dir):
@@ -595,17 +537,16 @@ def train(
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # Enable gradient checkpointing if needed
     if config.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         if config.train_text_encoder:
             text_encoder.gradient_checkpointing_enable()
 
-    # Enable TF32 for faster training on Ampere GPUs if needed
+    # Enable TF32 for faster training on Ampere GPUs,
+    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if config.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    # Setup optimizer
     optimizer = torch.optim.AdamW(
         unet.parameters(),
         lr=config.learning_rate,
@@ -614,11 +555,10 @@ def train(
         eps=config.adam_epsilon,
     )
 
-    # Load datasets
     train_dataset = instantiate_dataset(config.datasets, split=["TRAIN"])
     val_dataset = instantiate_dataset(config.datasets, split=["VAL"])
 
-    # Create DataLoader
+    # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -626,7 +566,7 @@ def train(
         num_workers=config.dataloader_num_workers,
     )
 
-    # Calculate training steps
+    # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / config.gradient_accumulation_steps
@@ -635,7 +575,6 @@ def train(
         config.max_train_steps = config.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    # Setup learning rate scheduler
     lr_scheduler = get_scheduler(
         config.lr_scheduler,
         optimizer=optimizer,
@@ -662,7 +601,8 @@ def train(
             # Move text encoder EMA model to the same device as the text encoder
             ema_text_encoder.to(accelerator.device)
 
-    # Setup mixed precision
+    # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
+    # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -671,17 +611,13 @@ def train(
         weight_dtype = torch.bfloat16
         config.mixed_precision = accelerator.mixed_precision
 
-    # Move models to the correct device and dtype
-    vae.to(accelerator.device, dtype=weight_dtype)
-    if not config.train_text_encoder:
-        text_encoder.to(accelerator.device, dtype=weight_dtype)
-
-    # Recalculate training steps
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / config.gradient_accumulation_steps
     )
     if overrode_max_train_steps:
         config.max_train_steps = config.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
     config.num_train_epochs = math.ceil(
         config.max_train_steps / num_update_steps_per_epoch
     )
@@ -690,7 +626,6 @@ def train(
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = OmegaConf.to_container(config, resolve=True)
-        # tracker_config = dict(vars(tracker_config))
         accelerator.init_trackers(
             config.tracker_project_name,
             tracker_config,
@@ -699,7 +634,7 @@ def train(
             },
         )
 
-    # Calculate total batch size and model parameters
+    # Train!
     total_batch_size = (
         config.train_batch_size
         * accelerator.num_processes
@@ -710,12 +645,10 @@ def train(
         p.numel() for p in unet.parameters() if p.requires_grad
     )
 
-    # Log training info
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {config.num_train_epochs}")
     logger.info(f"  Training mode = {training_mode}")
-    logger.info(f"  Conditioning type = {conditioning_type}")
     logger.info(f"  Instantaneous batch size per device = {config.train_batch_size}")
     logger.info(
         f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
@@ -725,11 +658,14 @@ def train(
     logger.info(
         f"  U-Net: Total params = {model_num_params} \t Trainable params = {model_trainable_params} ({model_trainable_params / model_num_params * 100:.2f}%)"
     )
-
-    # Resume from checkpoint if needed
+    # Set default values for guidance scales if not provided
+    if not hasattr(config, "condition_guidance_scale"):
+        config.condition_guidance_scale = 5.0  # default strong class guidance
+    logger.info(f"Condition guidance scale: {config.condition_guidance_scale}")
     global_step = 0
     first_epoch = 0
 
+    # Potentially load in the weights and states from a previous save
     if config.resume_from_checkpoint:
         if config.resume_from_checkpoint != "latest":
             path = os.path.basename(config.resume_from_checkpoint)
@@ -750,23 +686,22 @@ def train(
             accelerator.print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(config.output_dir, path))
             global_step = int(path.split("-")[1])
+
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
+
     else:
         initial_global_step = 0
 
-    # Setup progress bar
     progress_bar = tqdm(
         range(0, config.max_train_steps),
         initial=initial_global_step,
         desc="Steps",
+        # Only show the progress bar once on each machine.
+        # disable=not accelerator.is_local_main_process,
         disable=not accelerator.is_main_process,
     )
 
-    # Set unconditional probability
-    uncond_p = config.get("drop_conditioning", 0.3)
-
-    # Training loop
     for epoch in range(first_epoch, config.num_train_epochs):
         train_loss = 0.0
         prediction_mean = 0.0
@@ -776,43 +711,7 @@ def train(
         mean_losses = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                # Get batch data
-                latents = batch["video"]  # B x C x T x H x W
-                padding_indices = batch["padding"]  # B
-                key_frames = batch["key_frames"]  # B x C x H x W
-                # split key frames into 3 reference frames by C (from 12 to 4 each)
-                key_frames = key_frames.view(
-                    key_frames.shape[0], 4, 3, key_frames.shape[2], key_frames.shape[3]
-                )  # B x 4 x 3 x H x W
-                B, C, T, H, W = latents.shape
-
-                # Option 1: Extract 3 reference frames at indices 0, 32, 63 from the video
-                # ref_0 = latents[:, :, 0, :, :]  # Frame at index 0
-                # ref_32 = latents[:, :, torch.clamp(torch.tensor(32), 0, T-1), :, :]  # Frame at index 32
-                # ref_63 = latents[:, :, torch.clamp(torch.tensor(63), 0, T-1), :, :]  # Frame at index 63
-
-                # Oprion 2: Extract key frames for reference (here we use the provided key frames)
-                assert key_frames.shape[2] == 3, "Key frames should have 3 frames"
-                ref_0 = key_frames[:, :, 0, :, :]  # Use key frames for reference
-                ref_32 = key_frames[:, :, 1, :, :]
-                ref_63 = key_frames[:, :, 2, :, :]
-
-                # Create reference frames for the entire temporal sequence
-                ref_frame_expanded = torch.zeros_like(latents)  # B x C x T x H x W
-
-                # Apply reference frames to different temporal segments
-                ref_frame_expanded[:, :, :21, :, :] = ref_0.unsqueeze(2).repeat(
-                    1, 1, min(21, T), 1, 1
-                )  # 0th frame for indices 0-20
-                if T > 21:
-                    ref_frame_expanded[:, :, 21:43, :, :] = ref_32.unsqueeze(2).repeat(
-                        1, 1, min(22, T - 21), 1, 1
-                    )  # 32nd frame for indices 21-42
-                if T > 43:
-                    ref_frame_expanded[:, :, 43:, :, :] = ref_63.unsqueeze(2).repeat(
-                        1, 1, T - 43, 1, 1
-                    )  # 63rd frame for indices 43-end
-
+                latents = batch["key_frames"]  # B x C x H x W
                 # Get conditioning based on type and convert to proper dtype
                 if conditioning_type == "class_id":
                     conditioning = batch["class_id"].to(dtype=weight_dtype)
@@ -827,14 +726,6 @@ def train(
                     input_ids = input_ids.to(accelerator.device)
                     attention_mask = attention_mask.to(accelerator.device)
 
-                    # Add a seed reset before processing text through CLIP to avoid
-                    # potential RNG state corruption across processes
-                    if torch.distributed.is_initialized():
-                        # Manually reset seed to avoid mt19937 state corruption
-                        torch.manual_seed(1000 + global_step)
-                        if torch.cuda.is_available():
-                            torch.cuda.manual_seed_all(1000 + global_step)
-
                     # encode text inputs through CLIP
                     # The correct way to extract hidden states from CLIP text encoder
                     text_outputs = text_encoder(
@@ -847,53 +738,40 @@ def train(
                         f"Unsupported conditioning type: {conditioning_type}"
                     )
 
-                B, C, T, H, W = latents.shape
-
-                # Create loss mask from padding indices
-                frame_indices = (
-                    torch.arange(0, T, device=accelerator.device)
-                    .unsqueeze(0)
-                    .repeat(B, 1)
-                )
-                mask = (frame_indices <= padding_indices.unsqueeze(1)).float()
-                mask = mask.view(B, 1, T, 1, 1).expand(-1, C, -1, H, W)
-
-                # Apply conditioning dropout
+                B, C, H, W = latents.shape
                 if (
                     conditioning_type != "text"
                 ):  # text embeddings would already be in the right shape
                     conditioning = conditioning[:, None, None]
-                conditioning_mask = (
-                    torch.rand_like(
-                        conditioning[:, 0:1, 0:1],
-                        device=accelerator.device,
-                        dtype=weight_dtype,
-                    )
-                    > uncond_p
-                )
-                conditioning = conditioning * conditioning_mask
 
-                # Sample timesteps
+                # Class conditioning dropout (for class-free guidance)
+                class_conditioning_mask = torch.rand_like(
+                    conditioning[:, 0:1, 0:1],
+                    device=accelerator.device,
+                    dtype=weight_dtype,
+                ) > config.get("drop_conditioning", 0.3)
+                conditioning = conditioning * class_conditioning_mask
+
+                # Sample a random timestep for each video
                 timesteps = torch.randint(
                     0,
-                    int(scheduler.config.num_train_timesteps),
+                    int(noise_scheduler.config.num_train_timesteps),
                     (B,),
                     device=latents.device,
                 ).long()
 
-                # Sample noise
+                # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
-                if hasattr(config, "noise_offset") and config.noise_offset > 0:
+                if config.noise_offset > 0:
+                    # https://www.crosslabs.org//blog/diffusion-with-offset-noise
                     noise += config.noise_offset * torch.randn(
-                        (latents.shape[0], latents.shape[1], 1, 1, 1),
+                        (latents.shape[0], latents.shape[1], 1, 1),
                         device=latents.device,
                     )
-
                 # Add noise to inputs
                 if training_mode == "diffusion":
-                    # Standard diffusion process
                     if config.get("input_perturbation", 0) > 0.0:
-                        noisy_latents = scheduler.add_noise(
+                        noisy_latents = noise_scheduler.add_noise(
                             latents,
                             noise
                             + config.input_perturbation
@@ -904,48 +782,41 @@ def train(
                             timesteps,
                         )
                     else:
-                        noisy_latents = scheduler.add_noise(latents, noise, timesteps)
+                        noisy_latents = noise_scheduler.add_noise(
+                            latents, noise, timesteps
+                        )
                 else:
                     # Flow matching process
                     t = timesteps.float() / scheduler.config.num_train_timesteps
                     t = t.view(-1, 1, 1, 1, 1)
                     noisy_latents = (1 - t) * latents + t * noise
 
-                # Prepare model inputs
-                model_input = torch.cat((noisy_latents, ref_frame_expanded), dim=1)
-                model_input, padding = format_input(model_input, mult=3)
+                # Predict the noise residual and compute loss
+                noisy_latents, padding = format_input(noisy_latents, mult=3)
                 # Forward pass
                 forward_kwargs = {
                     "timestep": timesteps,
                     "encoder_hidden_states": conditioning,
                 }
-
-                if config.unet._class_name == "UNetSpatioTemporalConditionModel":
-                    dummy_added_time_ids = torch.zeros(
-                        (B, config.unet.addition_time_embed_dim),
-                        device=accelerator.device,
-                        dtype=weight_dtype,
-                    )
-                    forward_kwargs["added_time_ids"] = dummy_added_time_ids
-
-                model_pred = unet(sample=model_input, **forward_kwargs).sample
+                model_pred = unet(sample=noisy_latents, **forward_kwargs).sample
                 model_pred = format_output(model_pred, pad=padding)
-
                 # Set target based on training mode
                 if training_mode == "diffusion":
-                    if scheduler.config.prediction_type == "epsilon":
+                    if noise_scheduler.config.prediction_type == "epsilon":
                         target = noise
-                    elif scheduler.config.prediction_type == "v_prediction":
-                        target = scheduler.get_velocity(latents, noise, timesteps)
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
                     else:
+                        assert noise_scheduler.config.prediction_type == "sample", (
+                            f"Unknown prediction type {noise_scheduler.config.prediction_type}"
+                        )
                         target = latents
                 else:  # flow_matching
                     # Target is the normalized direction from noise to clean sample
                     target = latents - noise
 
-                # Compute loss with masking
+                # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-                loss = loss * mask
                 loss = loss.mean()
                 mean_loss = loss.item()
 
@@ -972,7 +843,7 @@ def train(
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            # Update EMA model if needed
+            # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 if config.use_ema:
                     ema_unet.step(unet.parameters())
@@ -1002,10 +873,9 @@ def train(
                 target_std = 0.0
                 mean_losses = 0.0
 
-                # Checkpointing
                 if global_step % config.checkpointing_steps == 0:
                     if accelerator.is_main_process:
-                        # Manage checkpoint limit
+                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if config.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(config.output_dir)
                             checkpoints = [
@@ -1015,6 +885,7 @@ def train(
                                 checkpoints, key=lambda x: int(x.split("-")[1])
                             )
 
+                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
                             if len(checkpoints) >= config.checkpoints_total_limit:
                                 num_to_remove = (
                                     len(checkpoints)
@@ -1026,6 +897,9 @@ def train(
                                 logger.info(
                                     f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
                                 )
+                                logger.info(
+                                    f"removing checkpoints: {', '.join(removing_checkpoints)}"
+                                )
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(
@@ -1033,7 +907,6 @@ def train(
                                     )
                                     shutil.rmtree(removing_checkpoint)
 
-                        # Save checkpoint
                         save_path = os.path.join(
                             config.output_dir, f"checkpoint-{global_step}"
                         )
@@ -1043,7 +916,6 @@ def train(
                         )
                         logger.info(f"Saved state to {save_path}")
 
-            # Update progress bar
             logs = {
                 "step_loss": loss.detach().item(),
                 "lr": lr_scheduler.get_last_lr()[0],
@@ -1053,43 +925,49 @@ def train(
             if global_step >= config.max_train_steps:
                 break
 
-            # Run validation
-            if (
-                accelerator.is_main_process
-                and global_step % config.validation_steps == 0
-            ):
-                if config.use_ema:
-                    ema_unet.store(unet.parameters())
-                    ema_unet.copy_to(unet.parameters())
-                    if config.train_text_encoder:
-                        # Ensure text encoder EMA is on the correct device
-                        ema_text_encoder.to(accelerator.device)
-                        # Get unwrapped text encoder
-                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
-                        ema_text_encoder.store(unwrapped_text_encoder.parameters())
-                        ema_text_encoder.copy_to(unwrapped_text_encoder.parameters())
+            if accelerator.is_main_process:
+                if global_step % config.validation_steps == 0:
+                    if config.use_ema:
+                        # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                        ema_unet.store(unet.parameters())
+                        ema_unet.copy_to(unet.parameters())
+                        if config.train_text_encoder:
+                            # Ensure text encoder EMA is on the correct device
+                            ema_text_encoder.to(accelerator.device)
+                            # Get unwrapped text encoder
+                            unwrapped_text_encoder = accelerator.unwrap_model(
+                                text_encoder
+                            )
+                            ema_text_encoder.store(unwrapped_text_encoder.parameters())
+                            ema_text_encoder.copy_to(
+                                unwrapped_text_encoder.parameters()
+                            )
 
-                log_validation(
-                    config,
-                    unet,
-                    vae,
-                    deepcopy(scheduler),
-                    accelerator,
-                    weight_dtype,
-                    epoch,
-                    val_dataset,
-                    conditioning_type=conditioning_type,
-                    text_encoder=text_encoder,
-                    tokenizer=tokenizer,
-                )
+                    log_validation(
+                        config,
+                        unet,
+                        vae,
+                        deepcopy(noise_scheduler),
+                        accelerator,
+                        weight_dtype,
+                        epoch,
+                        val_dataset,
+                        conditioning_type=conditioning_type,
+                        text_encoder=text_encoder,
+                        tokenizer=tokenizer,
+                    )
 
-                if config.use_ema:
-                    ema_unet.restore(unet.parameters())
-                    if config.train_text_encoder:
-                        # Get unwrapped text encoder
-                        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
-                        ema_text_encoder.restore(unwrapped_text_encoder.parameters())
-
+                    if config.use_ema:
+                        # Switch back to the original UNet parameters.
+                        ema_unet.restore(unet.parameters())
+                        if config.train_text_encoder:
+                            # Get unwrapped text encoder
+                            unwrapped_text_encoder = accelerator.unwrap_model(
+                                text_encoder
+                            )
+                            ema_text_encoder.restore(
+                                unwrapped_text_encoder.parameters()
+                            )
     # Save the final model
     if accelerator.is_main_process:
         # Create the pipeline using the trained modules
@@ -1125,9 +1003,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Train a diffusion or flow matching model with different conditioning options"
     )
-    parser.add_argument(
-        "--config", type=str, required=True, help="Path to the config file."
-    )
+    parser.add_argument("--config", type=str, help="Path to the config file.")
     parser.add_argument(
         "--training_mode",
         type=str,
@@ -1143,22 +1019,24 @@ def parse_args():
         help="Type of conditioning to use",
     )
     parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default="fp16",
-        choices=["no", "fp16", "bf16"],
-        help="Mixed precision training mode",
+        "--condition_guidance_scale",
+        type=float,
+        default=5.0,
+        help="Guidance scale for class conditioning (1.0=no guidance, recommended range: 1.0-10.0, higher means stronger influence)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
     args = parse_args()
     config = OmegaConf.load(args.config)
+
+    # Set guidance scale parameters from command line args
+    config.condition_guidance_scale = args.condition_guidance_scale
     # Set default validation samples if not in config
     if not hasattr(config, "num_validation_samples"):
         config.num_validation_samples = 4
-    config.mixed_precision = args.mixed_precision
 
     # Set default paths for text encoder and tokenizer if not in config
     if args.conditioning_type == "text" and (
