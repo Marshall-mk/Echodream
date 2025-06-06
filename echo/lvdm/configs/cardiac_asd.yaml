@@ -70,7 +70,7 @@ noise_scheduler:
 training_mode: diffusion
 train_batch_size: 4
 dataloader_num_workers: 16
-max_train_steps: 300000
+max_train_steps: 50000
 training_conditioning_type: class_id # class_id, text, or none
 
 learning_rate: 1e-5

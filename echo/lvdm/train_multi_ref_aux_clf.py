@@ -224,16 +224,21 @@ def log_validation(
     ref_frames_multi = []
     for e in ref_elements:
         key_frames = e["key_frames"]  # B x C x H x W
-        if key_frames.shape[1] < 3:
-            raise ValueError("Key frames must have at least 3 frames.")
-        # adjust key frames to have 3 frames
-        key_frames = key_frames.view(4, 3, key_frames.shape[1], key_frames.shape[2])
-        ref_0 = key_frames[:, 0, :, :]  # Frame at index 0
-        ref_32 = key_frames[:, 1, :, :]  # Frame at index 32
-        ref_63 = key_frames[:, 2, :, :]  # Frame at index 63
-        ref_frames_multi.append(
-            torch.stack([ref_0, ref_32, ref_63], dim=1)
-        )  # B x C x 3 x H x W
+        C = 4
+        T = key_frames.shape[0] // C
+        assert T >= 3, "Need at least 3 time frames"
+        assert key_frames.shape[0] % C == 0, "Total channels not divisible by C"
+
+        # Split into T frames, each with C channels
+        frames = [key_frames[i*C:(i+1)*C] for i in range(T)]  # Each frame: (C, H, W)
+
+        # Select the frames for t=0, t=32, t=63 — adjust if actual indices differ
+        selected = [frames[0], frames[1], frames[2]]  # Each is (C, H, W)
+
+        # Stack across time → shape: (T, C, H, W), then permute to (C, T, H, W)
+        stacked = torch.stack(selected, dim=0).permute(1, 0, 2, 3)  # Shape: (C, T, H, W)
+
+        ref_frames_multi.append(stacked)
 
     ref_frames_multi = torch.stack(ref_frames_multi, dim=0)  # B x C x 3 x H x W
     ref_frames_multi = ref_frames_multi.to(accelerator.device, weight_dtype)
@@ -926,22 +931,28 @@ def train(
                 latents = batch["video"]  # B x C x T x H x W
                 padding_indices = batch["padding"]  # B
                 key_frames = batch["key_frames"]  # B x C x H x W
-                # split key frames into 3 reference frames by C (from 12 to 4 each)
-                key_frames = key_frames.view(
-                    key_frames.shape[0], 4, 3, key_frames.shape[2], key_frames.shape[3]
-                )  # B x 4 x 3 x H x W
                 B, C, T, H, W = latents.shape
 
-                # Extract 3 reference frames at indices 0, 32, 63 from the video (here we use specific indices)
+                # Oprion 1: Extract 3 reference frames at indices 0, 32, 63 from the video (here we use specific indices)
                 # ref_0 = latents[:, :, 0, :, :]  # Frame at index 0
                 # ref_32 = latents[:, :, torch.clamp(torch.tensor(32), 0, T-1), :, :]  # Frame at index 32
                 # ref_63 = latents[:, :, torch.clamp(torch.tensor(63), 0, T-1), :, :]  # Frame at index 63
 
-                # Extract key frames for reference (here we use the provided key frames)
-                assert key_frames.shape[2] == 3, "Key frames should have 3 frames"
-                ref_0 = key_frames[:, :, 0, :, :]  # Use key frames for reference
-                ref_32 = key_frames[:, :, 1, :, :]
-                ref_63 = key_frames[:, :, 2, :, :]
+                # Oprion 2: Extract key frames for reference (here we use the provided key frames)
+                _, CT, _, _ = key_frames.shape
+                C = 4
+                Tk = CT // C
+
+                assert CT % C == 0, "C*T must be divisible by C"
+                assert Tk == 3, "Expected 3 key frames"
+
+                # Split along channel dim into T frames, each with C channels
+                frames = [key_frames[:, i*C:(i+1)*C, :, :] for i in range(Tk)]  # List of 3 tensors: (B, C, H, W)
+
+                # Unpack references
+                ref_0   = frames[0]
+                ref_32  = frames[1]
+                ref_63  = frames[2]
 
                 # Create reference frames for the entire temporal sequence
                 ref_frame_expanded = torch.zeros_like(latents)  # B x C x T x H x W
