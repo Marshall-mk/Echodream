@@ -111,7 +111,7 @@ class EchoDynamic(Dataset):
             "still": False,
         }
 
-        if "image" in self.outputs or "video" in self.outputs:
+        if "image" in self.outputs or "video" in self.outputs or "key_frames" in self.outputs:
             reader = decord.VideoReader(
                 row["VideoPath"],
                 ctx=decord.cpu(),
@@ -210,6 +210,42 @@ class EchoDynamic(Dataset):
             image = image.permute(2, 0, 1)  # H x W x C -> C x H x W
             output["image"] = self.transform(image)
 
+        if "key_frames" in self.outputs:
+            key_frame_columns = ["Start_ED", "ES", "End_ED"]
+            key_frames = []
+
+            for col in key_frame_columns:
+                if col in row and pd.notna(row[col]):
+                    frame_idx = int(row[col])
+                    # Ensure frame index is within bounds
+                    if 0 <= frame_idx < og_frame_count:
+                        frame = reader.get_batch([frame_idx])[0]  # H x W x C, uint8
+                        frame = frame.float() / 128.0 - 1  # normalize to [-1, 1]
+                        frame = frame.permute(2, 0, 1)  # H x W x C -> C x H x W
+                        key_frames.append(frame)
+                    else:
+                        # Use first frame as fallback if index is out of bounds
+                        frame = reader.get_batch([0])[0]
+                        frame = frame.float() / 128.0 - 1
+                        frame = frame.permute(2, 0, 1)
+                        key_frames.append(frame)
+                else:
+                    # Use first frame as fallback if column is missing or NaN
+                    frame = reader.get_batch([0])[0]
+                    frame = frame.float() / 128.0 - 1
+                    frame = frame.permute(2, 0, 1)
+                    key_frames.append(frame)
+
+            if key_frames:
+                # Stack key frames channel-wise: (3 frames x C x H x W) -> (3*C x H x W)
+                output["key_frames"] = torch.cat(key_frames, dim=0)
+            else:
+                # Fallback: use first frame repeated 3 times
+                first_frame = reader.get_batch([0])[0]
+                first_frame = first_frame.float() / 128.0 - 1
+                first_frame = first_frame.permute(2, 0, 1)
+                output["key_frames"] = torch.cat([first_frame] * 3, dim=0)
+
         if return_row:
             return output, row
 
@@ -237,7 +273,11 @@ class EchoDynamicLatent(EchoDynamic):
             "filename": row["FileName"],
         }
 
-        if "image" in self.outputs or "video" in self.outputs:
+        if (
+            "image" in self.outputs
+            or "video" in self.outputs
+            or "key_frames" in self.outputs
+        ):
             latent_file = row["VideoPath"]
             latent_video_tensor = torch.load(latent_file)  # T x C x H x W
             og_fps = row["FPS"]
@@ -312,6 +352,31 @@ class EchoDynamicLatent(EchoDynamic):
                 np.random.randint(0, og_frame_count, 1)
             ][0]  # C x H x W
             output["image"] = self.transform(latent_image_tensor)
+
+        if "key_frames" in self.outputs:
+            key_frame_columns = ["Start_ED", "ES", "End_ED"]
+            key_frames = []
+
+            for col in key_frame_columns:
+                if col in row and pd.notna(row[col]):
+                    frame_idx = int(row[col])
+                    # Ensure frame index is within bounds
+                    if 0 <= frame_idx < og_frame_count:
+                        key_frames.append(latent_video_tensor[frame_idx])  # C x H x W
+                    else:
+                        # Use first frame as fallback if index is out of bounds
+                        key_frames.append(latent_video_tensor[0])
+                else:
+                    # Use first frame as fallback if column is missing or NaN
+                    key_frames.append(latent_video_tensor[0])
+
+            if key_frames:
+                # Stack key frames channel-wise: (3 frames x C x H x W) -> (3*C x H x W)
+                output["key_frames"] = torch.cat(key_frames, dim=0)
+            else:
+                # Fallback: use first frame repeated 3 times
+                first_frame = latent_video_tensor[0]
+                output["key_frames"] = torch.cat([first_frame] * 3, dim=0)
 
         if return_row:
             return output, row
@@ -585,7 +650,11 @@ class EchoPediatricLatent(EchoDynamic):
             "filename": row["FileName"],
         }
 
-        if "image" in self.outputs or "video" in self.outputs:
+        if (
+            "image" in self.outputs
+            or "video" in self.outputs
+            or "key_frames" in self.outputs
+        ):
             latent_file = row["VideoPath"]
             latent_video_tensor = torch.load(latent_file)
             # T x C x H x W
@@ -646,6 +715,7 @@ class EchoPediatricLatent(EchoDynamic):
         if "lvef" in self.outputs:
             lvef = row["EF"] / 100.0
             output["lvef"] = torch.tensor(lvef, dtype=torch.float32)
+
         if "text" in self.outputs and "EF" in row:
             # Include view in text if available
             ef_text = self.text_template.format(int(row["EF"]))
@@ -658,8 +728,35 @@ class EchoPediatricLatent(EchoDynamic):
                 np.random.randint(0, og_frame_count, 1)
             ][0]  # C x H x W
             output["image"] = self.transform(latent_image_tensor)
+
+        if "key_frames" in self.outputs:
+            key_frame_columns = ["Start_ED", "ES", "End_ED"]
+            key_frames = []
+
+            for col in key_frame_columns:
+                if col in row and pd.notna(row[col]):
+                    frame_idx = int(row[col])
+                    # Ensure frame index is within bounds
+                    if 0 <= frame_idx < og_frame_count:
+                        key_frames.append(latent_video_tensor[frame_idx])  # C x H x W
+                    else:
+                        # Use first frame as fallback if index is out of bounds
+                        key_frames.append(latent_video_tensor[0])
+                else:
+                    # Use first frame as fallback if column is missing or NaN
+                    key_frames.append(latent_video_tensor[0])
+
+            if key_frames:
+                # Stack key frames channel-wise: (3 frames x C x H x W) -> (3*C x H x W)
+                output["key_frames"] = torch.cat(key_frames, dim=0)
+            else:
+                # Fallback: use first frame repeated 3 times
+                first_frame = latent_video_tensor[0]
+                output["key_frames"] = torch.cat([first_frame] * 3, dim=0)
+
         if return_row:
             return output, row
+
         return output
 
 
