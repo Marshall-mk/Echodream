@@ -193,13 +193,17 @@ def log_validation(
         assert key_frames.shape[0] % C == 0, "Total channels not divisible by C"
 
         # Split into T frames, each with C channels
-        frames = [key_frames[i*C:(i+1)*C] for i in range(T)]  # Each frame: (C, H, W)
+        frames = [
+            key_frames[i * C : (i + 1) * C] for i in range(T)
+        ]  # Each frame: (C, H, W)
 
         # Select the frames for t=0, t=32, t=63 — adjust if actual indices differ
         selected = [frames[0], frames[1], frames[2]]  # Each is (C, H, W)
 
         # Stack across time → shape: (T, C, H, W), then permute to (C, T, H, W)
-        stacked = torch.stack(selected, dim=0).permute(1, 0, 2, 3)  # Shape: (C, T, H, W)
+        stacked = torch.stack(selected, dim=0).permute(
+            1, 0, 2, 3
+        )  # Shape: (C, T, H, W)
 
         ref_frames_multi.append(stacked)
 
@@ -800,12 +804,14 @@ def train(
                 assert Tk == 3, "Expected 3 key frames"
 
                 # Split along channel dim into T frames, each with C channels
-                frames = [key_frames[:, i*C:(i+1)*C, :, :] for i in range(Tk)]  # List of 3 tensors: (B, C, H, W)
+                frames = [
+                    key_frames[:, i * C : (i + 1) * C, :, :] for i in range(Tk)
+                ]  # List of 3 tensors: (B, C, H, W)
 
                 # Unpack references
-                ref_0   = frames[0]
-                ref_32  = frames[1]
-                ref_63  = frames[2]
+                ref_0 = frames[0]
+                ref_32 = frames[1]
+                ref_63 = frames[2]
 
                 # Create reference frames for the entire temporal sequence
                 ref_frame_expanded = torch.zeros_like(latents)  # B x C x T x H x W
